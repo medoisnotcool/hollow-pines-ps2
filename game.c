@@ -13,6 +13,9 @@ const TypeDef TYPES[3] = {                       /* hp sp dmg cy r sw sh by y */
 const WeaponDef WEAP[2] = {
     {"AK-47",   .10f, 1, 20, 30, 1.0f, .014f},
     {"GLOCK 17", .16f, 0, 34, 15, 1.1f, .008f}};
+static const WeaponDef WSN = {"INTERVENTION", 1.05f, 0, 200, 5, 3.0f, .035f};
+const WeaponDef *wdef(int i) { return (G.mlg && i == 0) ? &WSN : &WEAP[i]; }
+int snp(void) { return G.mlg && G.cur == 0; }
 static const float DM[5] = {.5f, .8f, 1.f, 1.4f, 1.9f};
 static const char *DN[5] = {"EASY", "NORMAL", "HARD", "BRUTAL", "NIGHTMARE"};
 const char *dif_name(int d) { return DN[d - 1]; }
@@ -24,6 +27,9 @@ static float ds(float a, float b, float k, float dt) { return a + (b - a) * fmin
 /* ---------------- random ---------------- */
 static uint32_t rs = 0x1234567u;
 static float rnd(void) { rs ^= rs << 13; rs ^= rs >> 17; rs ^= rs << 5; return (float)(rs >> 8) * (1.f / 16777216.f); }
+
+static const char *POPS[9] = {"OH BABY A TRIPLE", "MOM GET THE CAMERA", "360 NO SCOPE", "420 BLAZE IT", "GET REKT SCRUB", "WOW", "NICE SHOT NOOB", "XX_NOSCOPE_XX", "SNIPED!"};
+static void pop(const char *t) { G.popTxt = t ? t : POPS[(int)(rnd() * 9) % 9]; G.popT = .9f; }
 
 static uint32_t mb;   /* mulberry32 - same generator as the web version, used for the forest */
 static float mbr(void) {
@@ -68,6 +74,7 @@ static void chunk_gen(Chunk *c, int cx, int cz) {
         t->apple = (hasA < .75f) && !(c->eaten >> i & 1);
         t->ax = x + cosf(aa) * ad * s; t->az = z + sinf(aa) * ad * s;
     }
+    for (int i = 0; i < 120; i++) { c->weed[i][0] = cx * CS + mbr() * CS; c->weed[i][1] = cz * CS + mbr() * CS; c->weed[i][2] = .45f + mbr() * .9f; }
 }
 
 static int floordiv(float v) { return (int)floorf(v / CS); }
@@ -190,12 +197,12 @@ static void update_arrows(float dt) {
         a->x += a->vx * dt; a->y += a->vy * dt; a->z += a->vz * dt;
         float dx = a->x - G.px, dz = a->z - G.pz;
         a->life -= dt;
-        if (!a->b && dx * dx + dz * dz < .6f && a->y > G.h && a->y < G.h + 1.9f) { hurt_player(12 * G.DMv); a->life = 0; }
+        if (a->life > 0 && !a->b && dx * dx + dz * dz < .6f && a->y > G.h && a->y < G.h + 1.9f) { hurt_player(12 * G.DMv); a->life = 0; }
         if (a->b) for (int k = 0; k < G.nmon; k++) {
             Mon *m = &G.mon[k]; float ex = a->x - m->x, ey = a->y - TYPES[m->type].cy, ez = a->z - m->z, rr = TYPES[m->type].r + .15f;
             if (ex * ex + ey * ey + ez * ez < rr * rr) {
                 m->hp -= 70; m->hurt = .1f; G.hmT = .15f;
-                if (m->hp <= 0) { kill_mon(k); G.score++; }
+                if (m->hp <= 0) { kill_mon(k); G.score++; if (G.mlg) pop(0); }
                 a->life = 0; break;
             }
         }
@@ -211,17 +218,17 @@ static void swap_weapon(int n) {
     G.pend = n; G.swT = .4f; G.reload = 0;
 }
 static void start_reload(void) {
-    if (G.reload <= 0 && G.ammo[G.cur] < WEAP[G.cur].mag) {
+    if (G.reload <= 0 && G.ammo[G.cur] < wdef(G.cur)->mag) {
         G.reload = 1.4f;
     }
 }
 
 static void shoot(void) {
-    const WeaponDef *w = &WEAP[G.cur];
+    const WeaponDef *w = wdef(G.cur);
     G.ammo[G.cur]--; G.cd = w->rate; G.shootT = .4f; G.rec = fminf(G.rec + 1, 1.5f); G.fl = .05f;
     G.kick += w->kick * (G.aiming ? .012f : .02f); G.yaw += (rnd() - .5f) * .006f;
    
-    float dx, dy, dz, sp = w->spread * (G.aiming ? .25f : 1.f);
+    float dx, dy, dz, sp = w->spread * (G.aiming ? (snp() ? .03f : .25f) : 1.f);
     cam_dir(&dx, &dy, &dz);
     dx += (rnd() - .5f) * sp; dy += (rnd() - .5f) * sp; dz += (rnd() - .5f) * sp;
     float l = sqrtf(dx * dx + dy * dy + dz * dz); dx /= l; dy /= l; dz /= l;
@@ -234,8 +241,8 @@ static void shoot(void) {
         if (px * px + py * py + pz * pz < T->r * T->r) { bt = t; best = i; }
     }
     if (best >= 0) {
-        Mon *m = &G.mon[best]; m->hp -= w->dmg; m->hurt = .1f; G.hmT = .15f;
-        if (m->hp <= 0) { kill_mon(best); G.score++; }
+        Mon *m = &G.mon[best]; m->hp -= w->dmg; m->hurt = .1f; G.hmT = G.mlg ? .32f : .15f;
+        if (m->hp <= 0) { kill_mon(best); G.score++; if (G.mlg) pop(0); }
     }
 }
 
@@ -250,8 +257,9 @@ static void try_catch(void) {             /* R1: catch / punch an incoming arrow
         float tt = sqrtf(dx * dx + dy * dy + dz * dz) / sp;
         if (tt < bt) { bt = tt; best = i; }
     }
-    G.punchGrab = best >= 0; G.punchD = G.punchT = .38f;
+    G.punchGrab = best >= 0; G.punchD = G.punchT = (G.mlg && best >= 0) ? .7f : .38f;
     if (best < 0) return;
+    if (G.mlg) { G.arr[best].life = -1; G.health = fminf(100.f, G.health + 8); pop("NACHO CHEESE +HP"); return; }
     Arrow *a = &G.arr[best]; int mi = find_mon(a->src);
     if (mi < 0) { float bd = 1e9f; for (int i = 0; i < G.nmon; i++) { float q = (G.mon[i].x - G.px) * (G.mon[i].x - G.px) + (G.mon[i].z - G.pz) * (G.mon[i].z - G.pz); if (q < bd) { bd = q; mi = i; } } }
     if (mi >= 0) {
@@ -267,7 +275,7 @@ static void set_dif(int v) { G.dif = v; G.DMv = DM[v - 1]; G.maxMon = (int)floor
 
 static void reset_game(void) {
     G.health = 100; G.score = 0; G.px = G.pz = 0; G.yaw = G.pitch = G.kick = 0; neaten = 0;
-    chunks_update(1); G.eatT = 0; G.h = G.vy = 0; G.onGround = 1; G.ammo[0] = WEAP[0].mag; G.ammo[1] = WEAP[1].mag;
+    chunks_update(1); G.eatT = 0; G.h = G.vy = 0; G.onGround = 1; G.ammo[0] = wdef(0)->mag; G.ammo[1] = wdef(1)->mag;
     set_weapon(0); G.pend = -1; G.reload = 0; G.swT = 0; G.dead = 0; G.started = 1; G.nmon = 0; G.narr = 0;
     G.punchT = 0; G.hmT = G.vigT = 0; G.spawnT = 2; G.rec = G.fl = G.shootT = G.cd = 0;
     for (int i = 0; i < 8; i++) spawn(18, 85);
@@ -280,7 +288,7 @@ static void play_update(const Input *in, float dt) {
     /* look (right stick) */
     float rate = .9f + G.look * .38f, ax = in->rx, ay = in->ry;
     ax = .35f * ax + .65f * ax * fabsf(ax); ay = .35f * ay + .65f * ay * fabsf(ay);
-    float asc = G.aiming ? .55f : 1.f;
+    float asc = G.aiming ? (snp() ? .25f : .55f) : 1.f;
     G.yaw -= ax * rate * dt * asc;
     G.pitch = fclampf(G.pitch + ay * rate * dt * asc * (G.invy ? -1.f : 1.f), -1.5f, 1.5f);
     /* move (left stick) */
@@ -306,7 +314,7 @@ static void play_update(const Input *in, float dt) {
         G.eatT -= dt; float el = 3 - G.eatT;
         if (el > 1.4f && el < 2.6f) G.health = fminf(100.f, G.health + dt * 25);
     }
-    if (G.reload > 0) { G.reload -= dt; if (G.reload <= 0) G.ammo[G.cur] = WEAP[G.cur].mag; }
+    if (G.reload > 0) { G.reload -= dt; if (G.reload <= 0) G.ammo[G.cur] = wdef(G.cur)->mag; }
     if (G.swT > 0) { G.swT -= dt; if (G.pend >= 0 && G.swT < .2f) { set_weapon(G.pend); G.pend = -1; } }
     /* buttons */
     if (in->pressed & B_TRIANGLE) swap_weapon(1 - G.cur);
@@ -316,7 +324,7 @@ static void play_update(const Input *in, float dt) {
         Chunk *c = 0; Tree *a = G.eatT <= 0 ? look_apple(&c) : 0;
         if (a) { a->apple = 0; c->eaten |= 1ull << a->idx; eaten_set(c->cx, c->cz, a->idx); G.eatT = 3; G.reload = 0; G.eatBites = 0; }
     }
-    int want = WEAP[G.cur].automatic ? (in->btn & B_R2) != 0 : (in->pressed & B_R2) != 0;
+    int want = wdef(G.cur)->automatic ? (in->btn & B_R2) != 0 : (in->pressed & B_R2) != 0;
     if (G.cd <= 0 && G.reload <= 0 && G.swT <= 0 && G.eatT <= 0 && want) {
         if (G.ammo[G.cur] > 0) shoot(); else start_reload();
     }
@@ -352,8 +360,9 @@ static void play_update(const Input *in, float dt) {
     G.sprA = ds(G.sprA, G.run && G.shootT <= 0 ? 1.f : 0.f, 8, dt);
     if (G.fl > 0) G.fl -= dt;
     if (G.punchT > 0) G.punchT -= dt;
+    if (G.popT > 0) G.popT -= dt;
     G.rec *= expf(-14 * dt); G.kick *= expf(-7 * dt);
-    float f = (float)G.fov * (G.aiming ? .62f : 1.f) * (G.run ? 1.07f : 1.f);
+    float f = (float)G.fov * (G.aiming ? (snp() ? .26f : .62f) : 1.f) * (G.run ? 1.07f : 1.f);
     G.curfov = ds(G.curfov, f, 10, dt);
     G.hmT -= dt; G.vigT = fmaxf(0.f, G.vigT - dt * 1.5f);
     Chunk *c = 0; G.hintApple = G.eatT <= 0 && look_apple(&c) != 0;
@@ -369,7 +378,7 @@ static void toggle_night(void) {
 }
 static int prev_state = ST_TITLE;
 static void menu_update(const Input *in, float dt) {
-    G.t += dt;
+    G.t += dt; if (G.toastT > 0) G.toastT -= dt;
     int n = menu_count(), up = (in->pressed & B_UP) != 0, dn = (in->pressed & B_DOWN) != 0;
     int lf = (in->pressed & B_LEFT) != 0, rt = (in->pressed & B_RIGHT) != 0;
     int ok = (in->pressed & (B_CROSS | B_START)) != 0, back = (in->pressed & B_CIRCLE) != 0;
@@ -409,7 +418,19 @@ void game_init(void) {
     chunks_update(1);
 }
 
+/* Hidden MLG toggle: R1+R2+L1+L2 pressed together. Only acts in the title menu or the pause menu. */
+static unsigned prev_combo;
+static void toggle_mlg(void) {
+    G.mlg ^= 1; G.ammo[0] = wdef(0)->mag; G.reload = 0; G.toastT = 2.5f; G.popT = 0;
+}
+
 void game_update(const Input *in, float dt) {
     if (dt > .05f) dt = .05f;
+    {
+        const unsigned COMBO = B_R1 | B_R2 | B_L1 | B_L2;
+        int now = (in->btn & COMBO) == COMBO;
+        if (now && !prev_combo && (G.state == ST_TITLE || G.state == ST_PAUSE)) toggle_mlg();
+        prev_combo = now;
+    }
     if (G.state == ST_PLAY) play_update(in, dt); else menu_update(in, dt);
 }

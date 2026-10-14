@@ -12,6 +12,12 @@ typedef struct { float x, y, z, r, g, b; } CV;      /* view-space vertex + colou
 #define ZN 0.25f
 #define ZF 160.f
 static float clampf(float v, float a, float b) { return v < a ? a : v > b ? b : v; }
+static void hsv(float h, float s, float v, float *r, float *g, float *b) {
+    h -= floorf(h); float k = h * 6.f; int i = (int)k; float f = k - (float)i, p = v * (1 - s), q = v * (1 - s * f), t = v * (1 - s * (1 - f));
+    switch (i % 6) { case 0: *r = v; *g = t; *b = p; break; case 1: *r = q; *g = v; *b = p; break; case 2: *r = p; *g = v; *b = t; break;
+                     case 3: *r = p; *g = q; *b = v; break; case 4: *r = t; *g = p; *b = v; break; default: *r = v; *g = p; *b = q; }
+}
+static unsigned hsv_rgb(float h, float s, float v) { float r, g, b; hsv(h, s, v, &r, &g, &b); return (unsigned)((int)(r * 255) << 16 | (int)(g * 255) << 8 | (int)(b * 255)); }
 
 /* ---------- camera ---------- */
 static float C_x, C_y, C_z, AX[3], AY[3], AZ[3], FOCAL, TANX;
@@ -74,6 +80,20 @@ static void poly_emit(const CV *p, int n, float zn, int zmode) {
     for (int i = 1; i < m - 1; i++) { gfx_tri(&gv[0], &gv[i], &gv[i + 1]); tri_count++; }
 }
 static void tri_cv(CV a, CV b, CV c) { CV p[3] = {a, b, c}; poly_emit(p, 3, ZN, 0); }
+/* stylised rolled pickup (MLG mode): pale body, dark tip, glowing ember. Camera facing, view space. */
+static CV jv(V3 c, float cr, float sr, float u, float v, float r, float g, float b) {
+    CV o = {c.x + u * cr - v * sr, c.y + u * sr + v * cr, c.z, r, g, b}; return o;
+}
+static void joint(V3 c, float L, float th, float rot, float k, float zn, int zmode) {
+    float cr = cosf(rot), sr = sinf(rot);
+    CV a[4] = {jv(c, cr, sr, -L, .45f * th, 214 * k, 208 * k, 196 * k), jv(c, cr, sr, .55f * L, .9f * th, 214 * k, 208 * k, 196 * k),
+               jv(c, cr, sr, .55f * L, -.9f * th, 214 * k, 208 * k, 196 * k), jv(c, cr, sr, -L, -.45f * th, 214 * k, 208 * k, 196 * k)};
+    CV t[4] = {jv(c, cr, sr, .55f * L, .9f * th, 74 * k, 62 * k, 54 * k), jv(c, cr, sr, .95f * L, th, 74 * k, 62 * k, 54 * k),
+               jv(c, cr, sr, .95f * L, -th, 74 * k, 62 * k, 54 * k), jv(c, cr, sr, .55f * L, -.9f * th, 74 * k, 62 * k, 54 * k)};
+    CV e[4] = {jv(c, cr, sr, .95f * L, .85f * th, 255, 130, 24), jv(c, cr, sr, L, .7f * th, 255, 90, 10),
+               jv(c, cr, sr, L, -.7f * th, 255, 90, 10), jv(c, cr, sr, .95f * L, -.85f * th, 255, 130, 24)};
+    poly_emit(a, 4, zn, zmode); poly_emit(t, 4, zn, zmode); poly_emit(e, 4, zn, zmode);
+}
 
 
 /* ---------- 2D helpers (HUD) ---------- */
@@ -86,7 +106,7 @@ static void line2(float x0, float y0, float x1, float y1, float w, unsigned rgb)
     gfx_tri(&a, &b, &c); gfx_tri(&a, &c, &d);
 }
 
-static const char FCH[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789 /.:!-+()%,'?<>=";
+static const char FCH[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789 /.:!-+()%,'?<>=_";
 static const unsigned char FNT[][7] = {
  {0b01110,0b10001,0b10001,0b11111,0b10001,0b10001,0b10001},{0b11110,0b10001,0b10001,0b11110,0b10001,0b10001,0b11110},
  {0b01110,0b10001,0b10000,0b10000,0b10000,0b10001,0b01110},{0b11110,0b10001,0b10001,0b10001,0b10001,0b10001,0b11110},
@@ -113,7 +133,7 @@ static const unsigned char FNT[][7] = {
  {0b11001,0b11010,0b00010,0b00100,0b01000,0b01011,0b10011},{0,0,0,0,0b01100,0b00100,0b01000},
  {0b00100,0b00100,0b01000,0,0,0,0},{0b01110,0b10001,0b00001,0b00010,0b00100,0,0b00100},
  {0b00010,0b00100,0b01000,0b10000,0b01000,0b00100,0b00010},{0b01000,0b00100,0b00010,0b00001,0b00010,0b00100,0b01000},
- {0,0,0b11111,0,0b11111,0,0}};
+ {0,0,0b11111,0,0b11111,0,0},{0,0,0,0,0,0,0b11111}};
 
 static float text_w(const char *s, int sc) { return (float)(strlen(s) * 6 * sc - sc); }
 static void text(float x, float y, int sc, unsigned rgb, int a, const char *s) {
@@ -157,9 +177,33 @@ static void draw_ground(void) {
         if (c.z < -GT * .9f || c.z > FOGF + GT || fabsf(c.x) > c.z * TANX + GT * 1.3f) continue;
         unsigned h = (unsigned)(gx0 + i) * 73856093u ^ (unsigned)(gz0 + j) * 19349663u; h ^= h >> 13; h *= 0x5bd1e995u; h ^= h >> 15;
         float k = .86f + .14f * (float)(h & 255) / 255.f, gr = 61 * k, gg = 122 * k, gb = 44 * k;
+        if (G.mlg) { k = .7f + .75f * (float)(h & 255) / 255.f; gr = 12 * k; gg = 80 * k; gb = 20 * k; }
         CV v0 = litcv(tv(x0, 0, z0), gr, gg, gb, 1), v1 = litcv(tv(x0 + GT, 0, z0), gr, gg, gb, 1),
            v2 = litcv(tv(x0 + GT, 0, z0 + GT), gr, gg, gb, 1), v3 = litcv(tv(x0, 0, z0 + GT), gr, gg, gb, 1);
         tri_cv(v0, v1, v2); tri_cv(v0, v2, v3);
+    }
+}
+
+/* ---------- MLG scenery: leaf plants ---------- */
+static void draw_weeds(void) {
+    static const float SN[5] = {0.f, .5f, -.5f, .848f, -.848f}, CN[5] = {1.f, .866f, .866f, .53f, .53f}, LN[5] = {1.f, .87f, .87f, .7f, .7f};
+    float nk = G.night ? .35f : 1.f;
+    for (int ci = 0; ci < NCH; ci++) {
+        const Chunk *c = &G.ch[ci]; if (!c->valid) continue;
+        float mx = (c->cx + .5f) * CS - C_x, mz = (c->cz + .5f) * CS - C_z;
+        if (mx * mx + mz * mz > 62.f * 62.f) continue;
+        for (int k = 0; k < 120; k++) {
+            float wx = c->weed[k][0], wz = c->weed[k][1], S = 1.2f * c->weed[k][2], dx = wx - C_x, dz = wz - C_z;
+            if (dx * dx + dz * dz > 26.f * 26.f) continue;
+            V3 b = tv(wx, 0, wz); if (b.z < .6f || fabsf(b.x) > b.z * TANX + 1.5f) continue;
+            for (int j = 0; j < 5; j++) {
+                float len = LN[j] * S * .8f, w = .09f * S;
+                V3 l = tv(wx - AX[0] * w * CN[j], 0, wz - AX[2] * w * CN[j]), rr = tv(wx + AX[0] * w * CN[j], 0, wz + AX[2] * w * CN[j]);
+                V3 tp = tv(wx + AX[0] * SN[j] * len, CN[j] * len, wz + AX[2] * SN[j] * len);
+                CV tri[3] = {{l.x, l.y, l.z, 11 * nk, 125 * nk, 26 * nk}, {rr.x, rr.y, rr.z, 11 * nk, 125 * nk, 26 * nk}, {tp.x, tp.y, tp.z, 51 * nk, 232 * nk, 74 * nk}};
+                poly_emit(tri, 3, .3f, 0);
+            }
+        }
     }
 }
 
@@ -217,22 +261,28 @@ static void draw_apples(void) {
         for (int k = 0; k < c->n; k++) {
             const Tree *t = &c->t[k]; if (!t->apple) continue;
             float dx = t->ax - C_x, dz = t->az - C_z; if (dx * dx + dz * dz > 38 * 38) continue;
+            if (G.mlg) {
+                V3 v = tv(t->ax, .4f, t->az); if (v.z < .4f || fabsf(v.x) > v.z * TANX + 1) continue;
+                float sp = .3f + .7f * fabsf(cosf(G.t * 1.8f + t->ax));
+                joint(v, .55f * sp, .1f, -.35f, G.night ? .55f : 1.f, .3f, 0);
+                continue;
+            }
             V3 v = tv(t->ax, .2f, t->az); if (v.z < .4f || fabsf(v.x) > v.z * TANX + 1) continue;
             CV p[6]; CV ctr = {v.x, v.y, v.z, 216 * LM[0], 40 * LM[1], 30 * LM[2]};
-            for (int i = 0; i < 6; i++) { float a = i * 1.0471976f; p[i] = ctr; p[i].x += cosf(a) * .2f; p[i].y += sinf(a) * .2f; }
-            for (int i = 0; i < 6; i++) { CV hl = ctr; hl.r += 25; hl.g += 20; hl.b += 20; hl.x -= .04f; hl.y += .05f; CV t3[3] = {ctr, p[i], p[(i + 1) % 6]}; poly_emit(t3, 3, .3f, 0); (void)hl; }
+            for (int i2 = 0; i2 < 6; i2++) { float a = i2 * 1.0471976f; p[i2] = ctr; p[i2].x += cosf(a) * .2f; p[i2].y += sinf(a) * .2f; }
+            for (int i2 = 0; i2 < 6; i2++) { CV t3[3] = {ctr, p[i2], p[(i2 + 1) % 6]}; poly_emit(t3, 3, .3f, 0); }
             CV st = ctr; st.r = 74; st.g = 45; st.b = 18;
             CV s3[3] = {{v.x - .015f, v.y + .18f, v.z, st.r, st.g, st.b}, {v.x + .015f, v.y + .18f, v.z, st.r, st.g, st.b}, {v.x, v.y + .3f, v.z, st.r, st.g, st.b}};
             poly_emit(s3, 3, .3f, 0);
         }
     }
 }
-
 /* ---------- monster art (vector versions of the web version's canvas sprites) ---------- */
 #include <stdint.h>
 #include <stdio.h>
 typedef struct { uint8_t k; float a, b, c, d, e, f; unsigned rgb; } Prim;   /* k: 0 ellipse 1 tri 2 line */
-static Prim ART[3][120]; static int NART[3]; static unsigned GPAL[3][3];
+static Prim ART[6][120]; static int NART[6]; static unsigned GPAL[3][3];
+static const float AW[6] = {128, 128, 128, 294, 256, 128}, AH[6] = {128, 128, 256, 300, 256, 256};   /* art 3-5 = MLG monsters */
 #define SLOT(n) (0x1000000u | (n))
 static void pe(int t, float cx, float cy, float rx, float ry, unsigned c) { Prim *p = &ART[t][NART[t]++]; p->k = 0; p->a = cx; p->b = cy; p->c = rx; p->d = ry; p->rgb = c; }
 static void pt(int t, float x0, float y0, float x1, float y1, float x2, float y2, unsigned c) { Prim *p = &ART[t][NART[t]++]; p->k = 1; p->a = x0; p->b = y0; p->c = x1; p->d = y1; p->e = x2; p->f = y2; p->rgb = c; }
@@ -240,6 +290,7 @@ static void pl(int t, float x0, float y0, float x1, float y1, float w, unsigned 
 static void qb(float x0, float y0, float cx, float cy, float x1, float y1, float t, float *ox, float *oy) {
     float u = 1 - t; *ox = u * u * x0 + 2 * u * t * cx + t * t * x1; *oy = u * u * y0 + 2 * u * t * cy + t * t * y1;
 }
+static void pr(int t, float x, float y, float w, float h, unsigned c) { pt(t, x, y, x + w, y, x + w, y + h, c); pt(t, x, y, x + w, y + h, x, y + h, c); }
 static unsigned hsl_pack(float h, float s, float l) {
     float q = l < .5f ? l * (1 + s) : l + s - l * s, p = 2 * l - q, t[3] = {h + 1.f / 3, h, h - 1.f / 3}, o[3];
     for (int i = 0; i < 3; i++) { float x = t[i]; if (x < 0) x += 1; if (x > 1) x -= 1; o[i] = x < 1.f / 6 ? p + (q - p) * 6 * x : x < .5f ? q : x < 2.f / 3 ? p + (q - p) * (2.f / 3 - x) * 6 : p; }
@@ -275,6 +326,45 @@ void render_init(void) {
     pl(2, 64, 74, 64, 106, 8, 0xd8d2c4);
     pe(2, 64, 40, 26, 36, 0xe6dfd0); pe(2, 50, 32, 10, 12, 0x000000); pe(2, 52, 30, 2, 2, 0xffffff); pe(2, 80, 44, 5, 5, 0x000000);
     { float lx = 36, ly = 60; for (int i = 1; i <= 8; i++) { float x, y; qb(36, 60, 66, 84, 94, 54, i / 8.f, &x, &y); pl(2, lx, ly, x, y, 2, 0x000000); if (i < 8) pl(2, x, y, x, y - 6, 1.5f, 0x000000); lx = x; ly = y; } }
+    /* MLG art 3: the all-seeing triangle (replaces goblins) */
+    pt(3, 147, 0, 0, 300, 294, 300, 0x4a7a46);
+    for (int y = 40; y < 175; y += 14) { float hw = y * .49f; pl(3, 147 - hw, (float)y, 147 + hw, (float)y, 3, 0x2f5a2e); }
+    pe(3, 147, 205, 97, 49, 0x28492a); pe(3, 147, 205, 92, 44, 0xcde0c6); pe(3, 147, 205, 38, 38, 0x24421f); pe(3, 147, 205, 27, 27, 0x58825a);
+    pe(3, 147, 205, 13, 13, 0x0a140a); pe(3, 157, 196, 5, 5, 0xebf5e6);
+    for (int i = 0; i < 6; i++) { float x0, y0, x1, y1; qb(52, 190, 147, 128, 242, 190, i / 6.f, &x0, &y0); qb(52, 190, 147, 128, 242, 190, (i + 1) / 6.f, &x1, &y1); pl(3, x0, y0, x1, y1, 6, 0x1e3c1e); }
+    /* MLG art 4: doge with pixel shades (replaces night archers) */
+    for (int s = 1; s >= -1; s -= 2) { pt(4, 128 + s * 62.f, 96, 128 + s * 84.f, 26, 128 + s * 20.f, 70, 0xd9983a); pt(4, 128 + s * 62.f, 88, 128 + s * 76.f, 44, 128 + s * 38.f, 70, 0xf4c5a0); }
+    pe(4, 128, 146, 91, 79, 0x000000); pe(4, 128, 146, 88, 76, 0xeab55f);
+    pe(4, 128, 184, 60, 38, 0xfff1da); pe(4, 78, 176, 30, 28, 0xfff1da); pe(4, 178, 176, 30, 28, 0xfff1da);
+    pe(4, 128, 164, 15, 10, 0x111111); pl(4, 128, 172, 128, 184, 4, 0x111111);
+    for (int i = 0; i < 4; i++) { float x0, y0, x1, y1;
+        qb(100, 184, 114, 204, 128, 184, i / 4.f, &x0, &y0); qb(100, 184, 114, 204, 128, 184, (i + 1) / 4.f, &x1, &y1); pl(4, x0, y0, x1, y1, 4, 0x111111);
+        qb(128, 184, 142, 204, 156, 184, i / 4.f, &x0, &y0); qb(128, 184, 142, 204, 156, 184, (i + 1) / 4.f, &x1, &y1); pl(4, x0, y0, x1, y1, 4, 0x111111); }
+    pe(4, 128, 198, 9, 7, 0xff7fa0);
+    pr(4, 44, 104, 168, 16, 0); pr(4, 56, 120, 56, 16, 0); pr(4, 144, 120, 56, 16, 0); pr(4, 64, 136, 40, 8, 0); pr(4, 152, 136, 40, 8, 0);
+    pr(4, 62, 108, 8, 8, 0xffffff); pr(4, 150, 108, 8, 8, 0xffffff);
+    /* MLG art 5: soda bottle with shades (replaces the tall man) */
+    { float px[48], py[48]; int n = 0;
+#define ADD(X, Y) (px[n] = (X), py[n] = (Y), n++)
+      ADD(52, 40); ADD(52, 24); ADD(76, 24); ADD(76, 40);
+      for (int i = 1; i <= 4; i++) { float x, y; qb(76, 40, 76, 62, 98, 84, i / 4.f, &x, &y); ADD(x, y); }
+      for (int i = 1; i <= 3; i++) { float x, y; qb(98, 84, 104, 92, 104, 110, i / 3.f, &x, &y); ADD(x, y); }
+      ADD(104, 232);
+      for (int i = 1; i <= 3; i++) { float x, y; qb(104, 232, 104, 248, 88, 248, i / 3.f, &x, &y); ADD(x, y); }
+      ADD(40, 248);
+      for (int i = 1; i <= 3; i++) { float x, y; qb(40, 248, 24, 248, 24, 232, i / 3.f, &x, &y); ADD(x, y); }
+      ADD(24, 110);
+      for (int i = 1; i <= 3; i++) { float x, y; qb(24, 110, 24, 92, 30, 84, i / 3.f, &x, &y); ADD(x, y); }
+      for (int i = 1; i <= 3; i++) { float x, y; qb(30, 84, 52, 62, 52, 40, i / 3.f, &x, &y); ADD(x, y); }
+#undef ADD
+      for (int pass = 0; pass < 2; pass++) { float sc = pass ? 1.f : 1.07f; unsigned col = pass ? 0x5fd91f : 0x000000;
+          for (int i = 0; i < n; i++) { int j = (i + 1) % n; pt(5, 64, 150, 64 + (px[i] - 64) * sc, 150 + (py[i] - 150) * sc, 64 + (px[j] - 64) * sc, 150 + (py[j] - 150) * sc, col); } } }
+    pr(5, 44, 100, 40, 144, 0xc6ff3a); pr(5, 32, 92, 6, 50, 0xd2f0c8); pr(5, 32, 214, 6, 26, 0xd2f0c8);
+    pr(5, 48, 4, 32, 24, 0); pr(5, 50, 6, 28, 20, 0xe02020);
+    pr(5, 21, 147, 86, 66, 0); pr(5, 24, 150, 80, 60, 0xe22427); pr(5, 34, 158, 60, 10, 0xffffff); pr(5, 32, 176, 64, 22, 0x8aff2a);
+    pr(5, 30, 100, 68, 10, 0); pr(5, 36, 110, 24, 12, 0); pr(5, 68, 110, 24, 12, 0); pr(5, 40, 122, 16, 6, 0); pr(5, 72, 122, 16, 6, 0);
+    pr(5, 38, 102, 6, 6, 0xffffff); pr(5, 70, 102, 6, 6, 0xffffff);
+    for (int i = 0; i < 6; i++) { float x0, y0, x1, y1; qb(46, 134, 64, 150, 82, 134, i / 6.f, &x0, &y0); qb(46, 134, 64, 150, 82, 134, (i + 1) / 6.f, &x1, &y1); pl(5, x0, y0, x1, y1, 4, 0x000000); }
 }
 
 static struct { V3 c; float ux, uy, cr, sr, Wt, Ht; } SC;
@@ -289,7 +379,7 @@ static CV scv(V3 v, unsigned rgb, int var, int tint) {
     CV o = {v.x, v.y, v.z, r, g, b}; return o;
 }
 static void art_draw(int t, int var, V3 c, float sw, float sh, float rot, float sx, float sy, int tint) {
-    SC.c = c; SC.Wt = 128; SC.Ht = t == 2 ? 256.f : 128.f; SC.ux = sw * sx / SC.Wt; SC.uy = sh * sy / SC.Ht; SC.cr = cosf(rot); SC.sr = sinf(rot);
+    SC.c = c; SC.Wt = AW[t]; SC.Ht = AH[t]; SC.ux = sw * sx / SC.Wt; SC.uy = sh * sy / SC.Ht; SC.cr = cosf(rot); SC.sr = sinf(rot);
     int segs = c.z > 35 ? 8 : 12;
     for (int i = 0; i < NART[t]; i++) {
         const Prim *p = &ART[t][i];
@@ -316,7 +406,12 @@ static void vquad(V3 c, float hw, float hh, float r, float g, float b) {
 static unsigned frs = 777;
 static float frnd(void) { frs = frs * 1664525u + 1013904223u; return (float)(frs >> 8) / 16777216.f; }
 
+static void fit_sz(const TypeDef *T, float asp, float *w, float *h) {
+    float bw = T->sw * 1.6f, bh = T->sh;
+    if (asp > bw / bh) { *w = bw; *h = bw / asp; } else { *w = bh * asp; *h = bh; }
+}
 static void draw_monsters(void) {
+    static const float MASP[3] = {294.f / 300.f, 1.f, .5f};
     int idx[MAXMON]; float zz[MAXMON]; int n = 0;
     for (int i = 0; i < G.nmon; i++) {
         const Mon *m = &G.mon[i]; V3 v = tv(m->x, TYPES[m->type].cy, m->z);
@@ -325,10 +420,11 @@ static void draw_monsters(void) {
     }
     for (int q = 0; q < n; q++) {
         const Mon *m = &G.mon[idx[q]]; const TypeDef *T = &TYPES[m->type];
-        float bob = sinf(G.t * 7 + m->ph), cyw = T->y + fabsf(bob) * .15f, rot = bob * .08f, sx = 1, sy = 1;
-        if (m->type == MT_M && frnd() < .05f) { sx = 1 + frnd() * .7f; sy = .92f; rot = (frnd() - .5f) * .35f; }
+        float sw = T->sw, sh = T->sh; if (G.mlg) fit_sz(T, MASP[m->type], &sw, &sh);
+        float bob = sinf(G.t * 7 + m->ph), cyw = T->y - (T->sh - sh) * .5f + fabsf(bob) * .15f, rot = bob * .08f, sx = 1, sy = 1;
+        if (!G.mlg && m->type == MT_M && frnd() < .05f) { sx = 1 + frnd() * .7f; sy = .92f; rot = (frnd() - .5f) * .35f; }
         V3 c = tv(m->x, cyw, m->z);
-        art_draw(m->type, m->variant, c, T->sw, T->sh, rot, sx, sy, m->hurt > 0);
+        art_draw(G.mlg ? 3 + m->type : m->type, m->variant, c, sw, sh, rot, sx, sy, m->hurt > 0);
         V3 bc = tv(m->x, T->by, m->z); float pct = clampf(m->hp / m->max, 0, 1);
         vquad(bc, .78f, .115f, 15, 15, 15);
         vquad((V3){bc.x - .75f * (1 - pct), bc.y, bc.z}, .75f * pct, .085f, pct > .5f ? 90 : pct > .25f ? 230 : 210, pct > .5f ? 200 : pct > .25f ? 150 : 50, pct > .5f ? 70 : 40);
@@ -336,7 +432,15 @@ static void draw_monsters(void) {
 }
 static void draw_arrows(void) {
     for (int i = 0; i < G.narr; i++) {
-        const Arrow *a = &G.arr[i]; float sp = sqrtf(a->vx * a->vx + a->vy * a->vy + a->vz * a->vz); if (sp < .01f) continue;
+        const Arrow *a = &G.arr[i];
+        if (G.mlg) {            /* tumbling nacho triangles */
+            V3 c = tv(a->x, a->y, a->z); if (c.z < .4f) continue;
+            float ang = G.t * 9.f + i * 1.7f; CV o[3], in[3];
+            for (int k = 0; k < 3; k++) { float aa = ang + k * 2.0943951f;
+                o[k] = (CV){c.x + cosf(aa) * .3f, c.y + sinf(aa) * .3f, c.z, 240, 104, 12}; in[k] = (CV){c.x + cosf(aa) * .21f, c.y + sinf(aa) * .21f, c.z - .01f, 255, 163, 26}; }
+            poly_emit(o, 3, .3f, 0); poly_emit(in, 3, .3f, 0); continue;
+        }
+        float sp = sqrtf(a->vx * a->vx + a->vy * a->vy + a->vz * a->vz); if (sp < .01f) continue;
         float k = 1.2f / sp; V3 p0 = tv(a->x, a->y, a->z), p1 = tv(a->x + a->vx * k, a->y + a->vy * k, a->z + a->vz * k);
         if (p0.z < .4f || p1.z < .4f) continue;
         float s0x = SCR_W * .5f + p0.x / p0.z * FOCAL, s0y = SCR_H * .5f - p0.y / p0.z * FOCAL, s1x = SCR_W * .5f + p1.x / p1.z * FOCAL, s1y = SCR_H * .5f - p1.y / p1.z * FOCAL;
@@ -409,20 +513,73 @@ static const PB AKP[] = {
     {.044f,0x2a2622,1200,1320,330,460,.12f},{.044f,0x2a2622,1120,1245,440,570,.3f},{.044f,0x2a2622,1035,1165,540,660,.5f},{.044f,0x2a2622,955,1085,630,750,.7f},
     {.045f,0x7a3b1e,1730,2060,255,420,0},{.05f,0x7a3b1e,2000,2200,340,520,0},{.05f,0x7a3b1e,2080,2230,300,590,.22f}};
 
+static void vshade(V3 n, unsigned rgb, float *r, float *g, float *b) {
+    float night = G.night ? .6f : 1.f, lam = -.3f * n.x + .7f * n.y - .6f * n.z; if (lam < 0) lam = 0;
+    float k = (.5f + .5f * lam) * night * 1.15f; *r = (rgb >> 16 & 255) * k; *g = (rgb >> 8 & 255) * k; *b = (rgb & 255) * k;
+}
+static void vcyl(float cx, float cy, float cz, float rad, float len, unsigned rgb) {    /* 6-sided prism along z */
+    float hz = len * .5f;
+    for (int k = 0; k < 6; k++) {
+        int n = (k + 1) % 6; float mx = (RC[6][k] + RC[6][n]) * .57735f, my = (RS[6][k] + RS[6][n]) * .57735f;
+        V3 nv = gdir((V3){mx, my, 0}), fcv = gpt((V3){cx + mx * rad * .866f, cy + my * rad * .866f, cz});
+        if (nv.x * fcv.x + nv.y * fcv.y + nv.z * fcv.z >= 0) continue;
+        float r, g, b; vshade(nv, rgb, &r, &g, &b);
+        V3 p[4] = {{cx + RC[6][k] * rad, cy + RS[6][k] * rad, cz - hz}, {cx + RC[6][n] * rad, cy + RS[6][n] * rad, cz - hz},
+                   {cx + RC[6][n] * rad, cy + RS[6][n] * rad, cz + hz}, {cx + RC[6][k] * rad, cy + RS[6][k] * rad, cz + hz}};
+        CV q[4]; for (int m = 0; m < 4; m++) { V3 w = gpt(p[m]); q[m] = (CV){w.x, w.y, w.z, r, g, b}; }
+        poly_emit(q, 4, .06f, 1);
+    }
+    for (int cap = -1; cap <= 1; cap += 2) {
+        V3 nv = gdir((V3){0, 0, (float)cap}), fcv = gpt((V3){cx, cy, cz + cap * hz});
+        if (nv.x * fcv.x + nv.y * fcv.y + nv.z * fcv.z >= 0) continue;
+        float r, g, b; vshade(nv, rgb, &r, &g, &b);
+        V3 a = gpt((V3){cx, cy, cz + cap * hz});
+        for (int k = 0; k < 6; k++) {
+            int n = (k + 1) % 6; V3 p1 = gpt((V3){cx + RC[6][k] * rad, cy + RS[6][k] * rad, cz + cap * hz}), p2 = gpt((V3){cx + RC[6][n] * rad, cy + RS[6][n] * rad, cz + cap * hz});
+            CV t[3] = {{a.x, a.y, a.z, r, g, b}, {p1.x, p1.y, p1.z, r, g, b}, {p2.x, p2.y, p2.z, r, g, b}}; poly_emit(t, 3, .06f, 1);
+        }
+    }
+}
+static void draw_sniper(void) {
+    const unsigned BK = 0x16181b, TN = 0x8a7a55, GN = 0x0e0f11, SK = 0x0b0b0d, ST = 0x1d1f22;
+    unsigned rb0 = hsv_rgb(G.t * .6f, 1, 1), rb1 = hsv_rgb(G.t * .6f + .15f, 1, 1);
+    vbox_a(0, 0, .02f, .025f, .0375f, .2f, 0, BK); vbox_a(0, .043f, .02f, .015f, .006f, .2f, 0, GN);
+    vbox_a(0, -.012f, -.36f, .024f, .0275f, .17f, 0, TN); vbox_a(0, .02f, -.36f, .025f, .006f, .15f, 0, rb0);
+    vcyl(0, .012f, -.62f, .013f, .7f, GN); vcyl(0, .012f, -1.0f, .021f, .09f, GN);
+    vcyl(0, .085f, -.02f, .024f, .34f, SK); vcyl(0, .085f, -.22f, .036f, .07f, SK); vcyl(0, .085f, .17f, .031f, .07f, SK); vcyl(0, .085f, -.09f, .0265f, .03f, rb1);
+    vbox_a(0, .055f, -.1f, .01f, .015f, .02f, 0, BK); vbox_a(0, .055f, .1f, .01f, .015f, .02f, 0, BK);
+    vbox_a(.055f, .012f, .1f, .035f, .007f, .007f, 0, GN); vbox_a(.092f, .012f, .1f, .015f, .015f, .015f, 0, GN);
+    vbox_a(0, -.075f, -.02f, .017f, .045f, .04f, 0, BK); vbox_a(0, -.085f, .17f, .02f, .05f, .025f, -.3f, BK); vbox_a(0, -.05f, .1f, .005f, .01f, .035f, 0, BK);
+    vbox_a(0, -.02f, .36f, .025f, .05f, .14f, 0, ST); vbox_a(0, .045f, .36f, .022f, .0175f, .1f, 0, BK); vbox_a(0, -.025f, .51f, .025f, .06f, .015f, 0, BK);
+    hand(0, -.12f, .17f, .065f, .065f, .09f); hand(-.02f, -.05f, -.32f, .065f, .065f, .1f);
+    limb(0, -.13f, .22f, .25f, -.6f, .76f, .07f); limb(-.02f, -.065f, -.26f, -.45f, -.7f, .9f, .07f);
+}
+
 static void draw_viewmodel(void) {
     FOGON = 0;
     const float hip[2][3] = {{.2f, -.21f, -.5f}, {.17f, -.17f, -.4f}}, aimp[2][3] = {{0, -.07f, -.42f}, {0, -.052f, -.3f}};
-    int w = G.cur; float A = G.aim, b = sinf(G.bobT);
+    static const float HS[3] = {.2f, -.23f, -.42f}, AS[3] = {0, -.118f, -.3f};          /* sniper hip / aim */
+    int w = G.cur, sn = snp(); float A = G.aim, b = sinf(G.bobT);
+    const float *hp = sn ? HS : hip[w], *ap = sn ? AS : aimp[w];
     float rl = G.reload > 0 ? sinf((1 - G.reload / 1.4f) * PI_F) : 0, sd = G.swT > 0 ? fmaxf(0.f, 1 - fabsf(G.swT - .2f) / .2f) : 0, ed = 0;
     if (G.eatT > 0) ed += fminf(1.f, fminf((3 - G.eatT) / .35f, G.eatT / .4f));
     if (G.punchT > 0) ed += fminf(1.f, fminf((G.punchD - G.punchT) / .08f, G.punchT / .08f));
     float a = 1 - A * .85f;
-    float px = hip[w][0] + (aimp[w][0] - hip[w][0]) * A + b * .012f * G.bobA * a - .04f * G.sprA;
-    float py = hip[w][1] + (aimp[w][1] - hip[w][1]) * A - fabsf(cosf(G.bobT)) * .014f * G.bobA * a - .05f * G.sprA - clampf(G.vy * .006f, -.08f, .08f) - rl * .2f - sd * .4f - ed * .8f;
-    float pz = hip[w][2] + (aimp[w][2] - hip[w][2]) * A + G.rec * .07f * (1 - A * .5f);
+    float px = hp[0] + (ap[0] - hp[0]) * A + b * .012f * G.bobA * a - .04f * G.sprA;
+    float py = hp[1] + (ap[1] - hp[1]) * A - fabsf(cosf(G.bobT)) * .014f * G.bobA * a - .05f * G.sprA - clampf(G.vy * .006f, -.08f, .08f) - rl * .2f - sd * .4f - ed * .8f;
+    float pz = hp[2] + (ap[2] - hp[2]) * A + G.rec * .07f * (1 - A * .5f);
     float rx = G.rec * .12f * (1 - A * .5f) - G.sprA * .15f - rl * .9f - sd * 1.f - ed * 1.2f + clampf(G.vy * .01f, -.12f, .12f);
     group_set(rx, G.sprA * .6f, rl * .5f, px, py, pz);
-    if (w == 0) {
+    if (w == 1) {
+        vbox_a(0, .02f, -.05f, .02f, .0225f, .1f, 0, 0x1c1c1c); vbox_a(0, -.012f, -.04f, .018f, .015f, .1f, 0, 0x2c2c2c);
+        vbox_a(0, -.07f, .04f, .019f, .055f, .025f, -.15f, 0x222222); vbox_a(0, .047f, -.14f, .003f, .005f, .003f, 0, 0xdddddd);
+        vbox_a(0, .047f, .04f, .01f, .004f, .005f, 0, 0x111111);
+        hand(0, -.08f, .06f, .06f, .06f, .08f); hand(-.045f, -.07f, 0, .06f, .06f, .08f);
+        limb(0, -.09f, .11f, .25f, -.65f, .7f, .07f); limb(-.045f, -.08f, .05f, -.5f, -.65f, .7f, .07f);
+        if (G.fl > 0) flash(0, .02f, -.17f);
+    } else if (sn) {
+        if (A < .55f) { draw_sniper(); if (G.fl > 0) flash(0, .012f, -1.07f); }      /* hidden while looking through the scope */
+    } else {
         for (unsigned i = 0; i < sizeof AKP / sizeof *AKP; i++) {
             const PB *p = &AKP[i];
             vbox_a(0, (225 - (p->y0 + p->y1) * .5f) * KK + .012f, ((p->x0 + p->x1) * .5f - 1350) * KK, p->t * .5f, (p->y1 - p->y0) * KK * .5f, (p->x1 - p->x0) * KK * .5f, p->ang, p->col);
@@ -430,13 +587,6 @@ static void draw_viewmodel(void) {
         hand(0, -.12f, .125f, .065f, .065f, .09f); hand(-.02f, -.055f, -.27f, .065f, .065f, .1f);
         limb(0, -.13f, .19f, .25f, -.6f, .76f, .07f); limb(-.02f, -.065f, -.21f, -.45f, -.7f, .9f, .07f);
         if (G.fl > 0) flash(0, .012f, -.64f);
-    } else {
-        vbox_a(0, .02f, -.05f, .02f, .0225f, .1f, 0, 0x1c1c1c); vbox_a(0, -.012f, -.04f, .018f, .015f, .1f, 0, 0x2c2c2c);
-        vbox_a(0, -.07f, .04f, .019f, .055f, .025f, -.15f, 0x222222); vbox_a(0, .047f, -.14f, .003f, .005f, .003f, 0, 0xdddddd);
-        vbox_a(0, .047f, .04f, .01f, .004f, .005f, 0, 0x111111);
-        hand(0, -.08f, .06f, .06f, .06f, .08f); hand(-.045f, -.07f, 0, .06f, .06f, .08f);
-        limb(0, -.09f, .11f, .25f, -.65f, .7f, .07f); limb(-.045f, -.08f, .05f, -.5f, -.65f, .7f, .07f);
-        if (G.fl > 0) flash(0, .02f, -.17f);
     }
     if (G.eatT > 0) {
         float t = 3 - G.eatT, x = .03f, y = -.14f, z = -.28f, rr = -.5f, sc = 1;
@@ -447,62 +597,123 @@ static void draw_viewmodel(void) {
         group_set(rr, 0, 0, x, y, z);
         hand(0, 0, 0, .075f, .075f, .09f); limb(0, -.01f, .06f, .1f, -.5f, .8f, .07f);
         if (t < 2.6f) {
-            V3 ac = gpt((V3){0, .07f, -.03f}); float r = .075f * sc;
-            for (int i = 0; i < 8; i++) {
-                float a0 = i * .785398f, a1 = a0 + .785398f; CV tr[3] = {{ac.x, ac.y, ac.z - r, 216, 40, 30}, {ac.x + cosf(a0) * r, ac.y + sinf(a0) * r, ac.z - r * .2f, 150, 25, 20}, {ac.x + cosf(a1) * r, ac.y + sinf(a1) * r, ac.z - r * .2f, 150, 25, 20}};
-                poly_emit(tr, 3, .06f, 1);
+            V3 ac = gpt((V3){0, .07f, -.03f});
+            if (G.mlg) joint(ac, .13f * sc, .03f * sc, -.5f, 1.f, .06f, 1);
+            else {
+                float r = .075f * sc;
+                for (int i = 0; i < 8; i++) {
+                    float a0 = i * .785398f, a1 = a0 + .785398f; CV tr[3] = {{ac.x, ac.y, ac.z - r, 216, 40, 30}, {ac.x + cosf(a0) * r, ac.y + sinf(a0) * r, ac.z - r * .2f, 150, 25, 20}, {ac.x + cosf(a1) * r, ac.y + sinf(a1) * r, ac.z - r * .2f, 150, 25, 20}};
+                    poly_emit(tr, 3, .06f, 1);
+                }
+                vbox_a(0, .07f + .078f * sc, -.03f, .004f, .015f, .004f, 0, 0x4a2d12);
             }
-            vbox_a(0, .07f + .078f * sc, -.03f, .004f, .015f, .004f, 0, 0x4a2d12);
         }
     }
     if (G.punchT > 0) {
-        float u = clampf(1 - G.punchT / G.punchD, 0, 1), k = u < .35f ? es(u / .35f) : u < .5f ? 1 : 1 - es((u - .5f) / .5f);
-        group_set(-.6f * k, 0, 0, .22f - .2f * k, -.5f + .38f * k, -.25f - .5f * k);
+        float u = clampf(1 - G.punchT / G.punchD, 0, 1), x, y, z, rr, sc = 1.f; int grab = G.mlg && G.punchGrab;
+        if (grab && u < .3f) { float k = es(u / .3f); x = .22f - .2f * k; y = -.5f + .35f * k; z = -.25f - .45f * k; rr = -.4f * k; }
+        else if (grab) { float k = es(fminf(1.f, (u - .3f) / .4f)); x = .02f + .01f * k; y = -.15f + .01f * k; z = -.7f + .42f * k; rr = -.5f * k; sc = u > .6f ? fmaxf(0.f, 1 - (u - .6f) / .35f) : 1.f; }
+        else { float k = u < .35f ? es(u / .35f) : u < .5f ? 1.f : 1 - es((u - .5f) / .5f); x = .22f - .2f * k; y = -.5f + .38f * k; z = -.25f - .5f * k; rr = -.6f * k; }
+        group_set(rr, 0, 0, x, y, z);
         hand(0, 0, 0, .075f, .075f, .1f); limb(0, 0, .06f, .1f, -.5f, .8f, .07f);
+        if (grab && sc > 0) {                       /* the nacho being eaten */
+            V3 c = gpt((V3){0, .06f, -.06f}); CV o[3], in[3];
+            for (int k = 0; k < 3; k++) { float aa = k * 2.0943951f + .5f;
+                o[k] = (CV){c.x + cosf(aa) * .09f * sc, c.y + sinf(aa) * .09f * sc, c.z, 240, 104, 12}; in[k] = (CV){c.x + cosf(aa) * .065f * sc, c.y + sinf(aa) * .065f * sc, c.z - .005f, 255, 163, 26}; }
+            poly_emit(o, 3, .06f, 1); poly_emit(in, 3, .06f, 1);
+        }
     }
     FOGON = 1;
 }
 
 /* ---------- HUD & menus ---------- */
+static unsigned pink_cycle(float off) { return hsv_rgb(.87f + G.t * .667f + off, 1.f, 1.f); }
+
+static void draw_scope(void) {                  /* black mask with a clear circle + crosshair */
+    const float cx = SCR_W * .5f, cy = SCR_H * .5f, R0 = SCR_H * .33f, R1 = 460.f;
+    for (int k = 0; k < 40; k++) {
+        float a0 = k * 6.2831853f / 40, a1 = (k + 1) * 6.2831853f / 40;
+        GVert p0 = {cx + cosf(a0) * R0, cy + sinf(a0) * R0, HZ, 0}, p1 = {cx + cosf(a1) * R0, cy + sinf(a1) * R0, HZ, 0},
+              p2 = {cx + cosf(a1) * R1, cy + sinf(a1) * R1, HZ, 0}, p3 = {cx + cosf(a0) * R1, cy + sinf(a0) * R1, HZ, 0};
+        gfx_tri(&p0, &p1, &p2); gfx_tri(&p0, &p2, &p3);
+    }
+    rect(cx - R0, cy - 1, cx + R0, cy + 1, 0x000000, 128); rect(cx - 1, cy - R0, cx + 1, cy + R0, 0x000000, 128);
+}
+
+static void draw_swirl(void) {                  /* MLG menu background */
+    enum { NX = 20, NY = 12 };
+    static GVert gv[(NX + 1) * (NY + 1)]; float t = G.t;
+    for (int j = 0; j <= NY; j++) for (int i = 0; i <= NX; i++) {
+        float sx = (float)i / NX * 160.f, sy = (float)j / NY * 90.f, dx = (sx - 80.f) / 90.f, dy = (sy - 45.f) / 90.f;
+        float rr = sqrtf(dx * dx + dy * dy), a = atan2f(dy, dx) + t * .6f, u = a * .4775f + rr * 2.6f - t * .5f, v = .62f + .38f * sinf(a * 4 - rr * 18 + t * 3);
+        GVert *g = &gv[j * (NX + 1) + i]; g->x = (float)i / NX * SCR_W; g->y = (float)j / NY * SCR_H; g->z = HZ; g->rgb = hsv_rgb(u, 1.f, v * .85f);
+    }
+    for (int j = 0; j < NY; j++) for (int i = 0; i < NX; i++) {
+        GVert *a = &gv[j * (NX + 1) + i], *b = a + 1, *c = &gv[(j + 1) * (NX + 1) + i + 1], *d = &gv[(j + 1) * (NX + 1) + i];
+        gfx_tri(a, b, c); gfx_tri(a, c, d);
+    }
+}
+
 static void draw_hud(void) {
-    char buf[48];
+    char buf[48]; int ml = G.mlg, scoped = snp() && G.aim > .5f;
     if (G.vigT > 0) {                       /* red damage frame */
         float v = clampf(G.vigT, 0, 1);
         for (int l = 0; l < 4; l++) { float w = 14.f * (l + 1); int a = (int)(v * (22 + (3 - l) * 14));
             rect(0, 0, SCR_W, w, 0xb00000, a); rect(0, SCR_H - w, SCR_W, SCR_H, 0xb00000, a); rect(0, w, w, SCR_H - w, 0xb00000, a); rect(SCR_W - w, w, SCR_W, SCR_H - w, 0xb00000, a); }
     }
     float cx = SCR_W * .5f, cy = SCR_H * .5f, ca = 1.f - G.aim;
-    if (ca > .05f) { int al = (int)(ca * 120); unsigned c = 0xffffff;
-        rect(cx - 12, cy - 1, cx - 5, cy + 1, c, al); rect(cx + 5, cy - 1, cx + 12, cy + 1, c, al);
-        rect(cx - 1, cy - 12, cx + 1, cy - 5, c, al); rect(cx - 1, cy + 5, cx + 1, cy + 12, c, al); }
-    rect(cx - 1, cy - 1, cx + 1, cy + 1, 0xffffff, 100);
-    if (G.hmT > 0) { line2(cx - 9, cy - 9, cx - 4, cy - 4, 2, 0xffffff); line2(cx + 9, cy - 9, cx + 4, cy - 4, 2, 0xffffff); line2(cx - 9, cy + 9, cx - 4, cy + 4, 2, 0xffffff); line2(cx + 9, cy + 9, cx + 4, cy + 4, 2, 0xffffff); }
+    if (scoped) draw_scope();
+    else {
+        if (ca > .05f) { int al = (int)(ca * 120); unsigned c = 0xffffff;
+            rect(cx - 12, cy - 1, cx - 5, cy + 1, c, al); rect(cx + 5, cy - 1, cx + 12, cy + 1, c, al);
+            rect(cx - 1, cy - 12, cx + 1, cy - 5, c, al); rect(cx - 1, cy + 5, cx + 1, cy + 12, c, al); }
+        rect(cx - 1, cy - 1, cx + 1, cy + 1, 0xffffff, 100);
+    }
+    if (G.hmT > 0) {
+        if (ml) { for (int s = 0; s < 2; s++) for (int q = 0; q < 4; q++) {
+                float sx = (q & 1) ? 1.f : -1.f, sy = (q & 2) ? 1.f : -1.f;
+                line2(cx + sx * 14, cy + sy * 14, cx + sx * 43, cy + sy * 43, s ? 9.f : 17.f, s ? 0xffffff : 0x000000); } }
+        else { line2(cx - 9, cy - 9, cx - 4, cy - 4, 2, 0xffffff); line2(cx + 9, cy - 9, cx + 4, cy - 4, 2, 0xffffff); line2(cx - 9, cy + 9, cx - 4, cy + 4, 2, 0xffffff); line2(cx + 9, cy + 9, cx + 4, cy + 4, 2, 0xffffff); }
+    }
     /* health */
     float hp = clampf(G.health / 100.f, 0, 1);
     rect(34, 386, 226, 404, 0x000000, 90); rect(36, 388, 36 + 188 * hp, 402, hp > .5f ? 0x5cc04a : hp > .25f ? 0xe0a030 : 0xd03030, 128);
     snprintf(buf, sizeof buf, "%d", (int)ceilf(G.health)); text_sh(234, 389, 2, 0xffffff, buf);
     text_sh(36, 372, 1, 0xdddddd, "HEALTH");
     /* ammo */
-    const WeaponDef *w = &WEAP[G.cur];
+    const WeaponDef *w = wdef(G.cur);
     snprintf(buf, sizeof buf, "%d / %d", G.ammo[G.cur], w->mag);
-    text_sh(SCR_W - 34 - text_w(buf, 3), 384, 3, G.ammo[G.cur] == 0 ? 0xff5050 : 0xffffff, buf);
-    text_sh(SCR_W - 34 - text_w(w->name, 2), 364, 2, 0xdddddd, w->name);
+    text_sh(SCR_W - 34 - text_w(buf, 3), 384, 3, G.ammo[G.cur] == 0 ? 0xff5050 : ml ? pink_cycle(0) : 0xffffff, buf);
+    text_sh(SCR_W - 34 - text_w(w->name, 2), 364, 2, ml ? pink_cycle(.2f) : 0xdddddd, w->name);
     if (G.reload > 0) text_sh(SCR_W - 34 - text_w("RELOADING", 2), 346, 2, 0xffd060, "RELOADING");
-    snprintf(buf, sizeof buf, "SLAIN: %d", G.score); text_sh(34, 28, 2, 0xc9e265, buf);
-    if (G.hintApple) text_c(cx, 300, 2, 0xffffff, "PRESS SQUARE TO EAT APPLE");
+    snprintf(buf, sizeof buf, "SLAIN: %d", G.score); text_sh(34, 28, 2, ml ? pink_cycle(.4f) : 0xc9e265, buf);
+    if (G.hintApple) text_c(cx, 300, 2, 0xffffff, ml ? "PRESS SQUARE TO EAT IT" : "PRESS SQUARE TO EAT APPLE");
     if (G.eatT > 0) text_c(cx, 300, 2, 0xffd9a0, "NOM...");
+    if (ml && G.popT > 0 && G.popTxt) {         /* kill pop-ups */
+        int sc = strlen(G.popTxt) > 14 ? 4 : 5;
+        text_c(cx, SCR_H * .28f + sinf(G.t * 30.f) * 3.f, sc, pink_cycle(0), G.popTxt);
+    }
 }
 static void menu_button(float cx, float y, float w, const char *s, int sel) {
+    if (G.mlg) {
+        rect(cx - w * .5f, y, cx + w * .5f, y + 30, sel ? 0xffee00 : 0xff1493, 128);
+        rect(cx - w * .5f, y, cx + w * .5f, y + 2, 0xffffff, 128); rect(cx - w * .5f, y + 28, cx + w * .5f, y + 30, 0xffffff, 128);
+        text_sh(cx - text_w(s, 2) * .5f, y + 8, 2, sel ? 0x000000 : 0xffffff, s);
+        return;
+    }
     rect(cx - w * .5f, y, cx + w * .5f, y + 30, sel ? 0x2a4a1a : 0x000000, sel ? 120 : 80);
     if (sel) { rect(cx - w * .5f, y, cx + w * .5f, y + 2, 0xc9e265, 128); rect(cx - w * .5f, y + 28, cx + w * .5f, y + 30, 0xc9e265, 128); }
     text_sh(cx - text_w(s, 2) * .5f, y + 8, 2, sel ? 0xe8ff90 : 0xcccccc, s);
 }
 static void draw_menus(void) {
     float cx = SCR_W * .5f; char b[64];
-    if (G.state == ST_TITLE || G.state == ST_OPTIONS) rect(0, 0, SCR_W, SCR_H, 0x000000, 70);
+    if (G.mlg) draw_swirl();
+    else if (G.state == ST_TITLE || G.state == ST_OPTIONS) rect(0, 0, SCR_W, SCR_H, 0x000000, 70);
     else rect(0, 0, SCR_W, SCR_H, G.state == ST_DEAD ? 0x400000 : 0x000000, 90);
     if (G.state == ST_TITLE) {
-        text_c(cx, 70, 6, 0xc9e265, "HOLLOW PINES");
+        if (G.mlg) { const char *tt = "XX_HOLLOW PINES_XX"; float x0 = cx - text_w(tt, 5) * .5f;
+            for (int i = 0; tt[i]; i++) { char ch[2] = {tt[i], 0}; text_sh(x0 + i * 30.f, 72, 5, hsv_rgb(G.t * .5f + i * .06f, 1.f, 1.f), ch); } }
+        else text_c(cx, 70, 6, 0xc9e265, "HOLLOW PINES");
         text_c(cx, 126, 2, 0xb0b8a0, "SOMETHING IS MOVING BETWEEN THE TREES");
         menu_button(cx, 200, 260, "START", G.sel == 0); menu_button(cx, 244, 260, "OPTIONS", G.sel == 1);
     } else if (G.state == ST_PAUSE) {
@@ -521,6 +732,7 @@ static void draw_menus(void) {
         snprintf(b, sizeof b, "INVERT Y  < %s >", G.invy ? "ON" : "OFF"); menu_button(cx, 290, 360, b, G.sel == 4);
         menu_button(cx, 330, 360, "BACK", G.sel == 5);
     }
+    if (G.toastT > 0 && (G.state == ST_TITLE || G.state == ST_PAUSE)) text_c(cx, 400, 2, 0xffee00, G.mlg ? "MLG MODE ON" : "MLG MODE OFF");
 }
 
 void render_frame(void) {
@@ -534,7 +746,7 @@ void render_frame(void) {
     unsigned sky = G.night ? 0x070c1a : 0xa9cfe6;
     gfx_begin(sky); tri_count = 0;
     cam_setup(x, y, z, yaw, pitch, fov);
-    draw_sky(pitch); draw_ground(); draw_trees(); draw_apples(); draw_monsters(); draw_arrows();
+    draw_sky(pitch); draw_ground(); if (G.mlg) draw_weeds(); draw_trees(); draw_apples(); draw_monsters(); draw_arrows();
     if (playing && !G.dead && (G.state == ST_PLAY || G.state == ST_PAUSE)) draw_viewmodel();
     if (G.state == ST_PLAY) draw_hud(); else draw_menus();
     gfx_end();

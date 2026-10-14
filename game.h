@@ -26,7 +26,7 @@ extern const TypeDef TYPES[3];
 extern const WeaponDef WEAP[2];
 
 typedef struct { float x, z, s, cr, sr, r, g, b, ax, az; uint8_t apple, idx; } Tree;
-typedef struct { int cx, cz, valid, n; uint64_t eaten; Tree t[36]; } Chunk;
+typedef struct { int cx, cz, valid, n; uint64_t eaten; Tree t[36]; float weed[120][3]; } Chunk;   /* weed: x, z, scale (MLG scenery) */
 typedef struct { float x, z, hp, max, sp, fire, hurt, atk, ph, hd, sd; int type, variant, uid; } Mon;
 typedef struct { float x, y, z, vx, vy, vz, life; int b, src; } Arrow;   /* b: caught & thrown back */
 
@@ -49,7 +49,7 @@ typedef struct {
     Mon mon[MAXMON]; int nmon, nextUid;
     Arrow arr[MAXARR]; int narr;
     Chunk ch[NCH]; int lastCx, lastCz;
-    char msg[64];
+    int mlg; float toastT, popT; const char *popTxt;   /* MLG mode toggle, on-screen toast, kill pop-up text */
 } Game;
 extern Game G;
 
@@ -58,4 +58,6 @@ void game_update(const Input *in, float dt);
 void render_init(void);
 void render_frame(void);
 const char *dif_name(int d);
+const WeaponDef *wdef(int i);   /* weapon 0 becomes the sniper while MLG mode is on */
+int snp(void);                  /* MLG sniper equipped? */
 #endif

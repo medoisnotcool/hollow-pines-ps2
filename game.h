@@ -17,7 +17,7 @@ enum { B_UP=1<<0, B_DOWN=1<<1, B_LEFT=1<<2, B_RIGHT=1<<3, B_CROSS=1<<4, B_CIRCLE
        B_SQUARE=1<<6, B_TRIANGLE=1<<7, B_L1=1<<8, B_R1=1<<9, B_L2=1<<10, B_R2=1<<11,
        B_START=1<<12, B_SELECT=1<<13, B_L3=1<<14, B_R3=1<<15 };
 
-enum { ST_TITLE, ST_OPTIONS, ST_PLAY, ST_PAUSE, ST_DEAD };
+enum { ST_TITLE, ST_OPTIONS, ST_PLAY, ST_PAUSE, ST_DEAD, ST_MPSETUP, ST_MPLOBBY };
 enum { MT_N, MT_A, MT_M };      /* goblin, night archer, "Mandela monster" */
 
 typedef struct { float hp, sp, dmg, cy, r, sw, sh, by, y; } TypeDef;

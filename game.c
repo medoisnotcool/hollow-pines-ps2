@@ -1,6 +1,9 @@
 /* Hollow Pines - gameplay (platform independent). Port of the web version minus
  * monster customiser, cheats/MLG theme and multiplayer. */
 #include "game.h"
+#include "mp.h"
+#include "arena.h"
+#include <stdlib.h>
 #include <math.h>
 #include <string.h>
 
@@ -232,6 +235,7 @@ static void shoot(void) {
     cam_dir(&dx, &dy, &dz);
     dx += (rnd() - .5f) * sp; dy += (rnd() - .5f) * sp; dz += (rnd() - .5f) * sp;
     float l = sqrtf(dx * dx + dy * dy + dz * dz); dx /= l; dy /= l; dz /= l;
+    if (mp_in_match()) { mp_shoot(G.px, eye_y(), G.pz, dx, dy, dz, (int)w->dmg); return; }   /* multiplayer: hit other players */
     float ox = G.px, oy = eye_y(), oz = G.pz, bt = tree_hit(ox, oy, oz, dx, dy, dz, 120.f); int best = -1;
     for (int i = 0; i < G.nmon; i++) {
         Mon *m = &G.mon[i]; const TypeDef *T = &TYPES[m->type];
@@ -285,6 +289,11 @@ static void reset_game(void) {
 static void play_update(const Input *in, float dt) {
     if (in->pressed & B_START) { G.state = ST_PAUSE; G.sel = 0; return; }
     G.t += dt;
+    const int mp = mp_in_match();
+    if (mp && M.dead) {          /* eliminated: wait for the respawn timer (handled in mp_update) */
+        G.vigT = fmaxf(0.f, G.vigT - dt * 1.5f); G.hmT -= dt; G.punchT = 0; G.fl = 0; G.moving = 0; G.run = 0; G.aiming = 0;
+        G.aim = ds(G.aim, 0.f, 12, dt); G.kick *= expf(-7 * dt); return;
+    }
     /* look (right stick) */
     float rate = .9f + G.look * .38f, ax = in->rx, ay = in->ry;
     ax = .35f * ax + .65f * ax * fabsf(ax); ay = .35f * ay + .65f * ay * fabsf(ay);
@@ -307,7 +316,7 @@ static void play_update(const Input *in, float dt) {
         G.vy -= 22 * dt; G.h += G.vy * dt;
         if (G.h <= 0) { G.h = 0; G.vy = 0; G.onGround = 1; G.kick += .03f; }
     }
-    collide(&G.px, &G.pz, .4f); chunks_update(0);
+    if (mp) ar_collide(&G.px, &G.pz, .4f, G.h); else { collide(&G.px, &G.pz, .4f); chunks_update(0); }
     /* timers */
     G.cd -= dt; G.shootT -= dt;
     if (G.eatT > 0) {
@@ -319,8 +328,8 @@ static void play_update(const Input *in, float dt) {
     /* buttons */
     if (in->pressed & B_TRIANGLE) swap_weapon(1 - G.cur);
     if (in->pressed & B_CIRCLE) start_reload();
-    if (in->pressed & B_R1) try_catch();
-    if (in->pressed & B_SQUARE) {
+    if (in->pressed & B_R1) { if (mp) mp_punch(); else try_catch(); }
+    if ((in->pressed & B_SQUARE) && !mp) {
         Chunk *c = 0; Tree *a = G.eatT <= 0 ? look_apple(&c) : 0;
         if (a) { a->apple = 0; c->eaten |= 1ull << a->idx; eaten_set(c->cx, c->cz, a->idx); G.eatT = 3; G.reload = 0; G.eatBites = 0; }
     }
@@ -328,9 +337,9 @@ static void play_update(const Input *in, float dt) {
     if (G.cd <= 0 && G.reload <= 0 && G.swT <= 0 && G.eatT <= 0 && want) {
         if (G.ammo[G.cur] > 0) shoot(); else start_reload();
     }
-    update_arrows(dt);
+    if (!mp) update_arrows(dt);
     G.spawnT -= dt;
-    if (G.spawnT <= 0 && G.nmon < G.maxMon) { spawn(60, 90); G.spawnT = 2 / G.DMv; }
+    if (!mp && G.spawnT <= 0 && G.nmon < G.maxMon) { spawn(60, 90); G.spawnT = 2 / G.DMv; }
     G.lastHit += dt;
     /* monsters */
     for (int i = G.nmon - 1; i >= 0; i--) {
@@ -365,12 +374,12 @@ static void play_update(const Input *in, float dt) {
     float f = (float)G.fov * (G.aiming ? (snp() ? .26f : .62f) : 1.f) * (G.run ? 1.07f : 1.f);
     G.curfov = ds(G.curfov, f, 10, dt);
     G.hmT -= dt; G.vigT = fmaxf(0.f, G.vigT - dt * 1.5f);
-    Chunk *c = 0; G.hintApple = G.eatT <= 0 && look_apple(&c) != 0;
+    Chunk *c = 0; G.hintApple = !mp && G.eatT <= 0 && look_apple(&c) != 0;
 }
 
 /* ---------------- menus ---------------- */
 static int menu_count(void) {
-    switch (G.state) { case ST_TITLE: return 2; case ST_PAUSE: return 3; case ST_DEAD: return 2; case ST_OPTIONS: return 6; default: return 1; }
+    switch (G.state) { case ST_TITLE: return 3; case ST_PAUSE: return 3; case ST_DEAD: return 2; case ST_OPTIONS: return 6; default: return 1; }
 }
 static void toggle_night(void) {
     G.night ^= 1; G.nmon = 0; G.narr = 0;
@@ -387,13 +396,16 @@ static void menu_update(const Input *in, float dt) {
     switch (G.state) {
     case ST_TITLE:
         if (ok && G.sel == 0) { reset_game(); G.state = ST_PLAY; }
-        else if (ok && G.sel == 1) { prev_state = ST_TITLE; G.state = ST_OPTIONS; G.sel = 0; }
+        else if (ok && G.sel == 1) { G.state = ST_MPSETUP; M.field = 9; M.msg[0] = 0; }
+        else if (ok && G.sel == 2) { prev_state = ST_TITLE; G.state = ST_OPTIONS; G.sel = 0; }
         break;
+    case ST_MPSETUP: mp_setup_input(in); break;
+    case ST_MPLOBBY: if (back) mp_leave(); break;
     case ST_PAUSE:
         if (back || (in->pressed & B_START)) { G.state = ST_PLAY; break; }
         if (ok && G.sel == 0) G.state = ST_PLAY;
         else if (ok && G.sel == 1) { prev_state = ST_PAUSE; G.state = ST_OPTIONS; G.sel = 0; }
-        else if (ok && G.sel == 2) { G.state = ST_TITLE; G.sel = 0; G.started = 0; G.nmon = 0; G.narr = 0; }
+        else if (ok && G.sel == 2) { mp_leave(); G.state = ST_TITLE; G.sel = 0; G.started = 0; G.nmon = 0; G.narr = 0; }
         break;
     case ST_DEAD:
         if (ok && G.sel == 0) { reset_game(); G.state = ST_PLAY; }
@@ -406,7 +418,7 @@ static void menu_update(const Input *in, float dt) {
         if (G.sel == 2 && d) { G.fov += d * 5; if (G.fov < 60) G.fov = 60; if (G.fov > 110) G.fov = 110; }
         if (G.sel == 3 && d) { G.look += d; if (G.look < 1) G.look = 1; if (G.look > 10) G.look = 10; }
         if (G.sel == 4 && (d || ok)) G.invy ^= 1;
-        if ((ok && G.sel == 5) || back) { G.state = prev_state; G.sel = prev_state == ST_TITLE ? 1 : 1; }
+        if ((ok && G.sel == 5) || back) { G.state = prev_state; G.sel = prev_state == ST_TITLE ? 2 : 1; }
         break; }
     }
 }
@@ -416,6 +428,7 @@ void game_init(void) {
     rs = 0xC0FFEEu; G.state = ST_TITLE; G.fov = 80; G.look = 5; G.curfov = 80; G.pend = -1; G.onGround = 1;
     set_dif(3); G.health = 100;
     chunks_update(1);
+    mp_init();
 }
 
 /* Hidden MLG toggle: R1+R2+L1+L2 pressed together. Only acts in the title menu or the pause menu. */
@@ -426,6 +439,7 @@ static void toggle_mlg(void) {
 
 void game_update(const Input *in, float dt) {
     if (dt > .05f) dt = .05f;
+    mp_update(dt);
     {
         const unsigned COMBO = B_R1 | B_R2 | B_L1 | B_L2;
         int now = (in->btn & COMBO) == COMBO;

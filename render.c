@@ -2,6 +2,8 @@
  * screen-space gouraud triangles to the gfx backend. */
 #include "game.h"
 #include "gfx.h"
+#include "arena.h"
+#include "mp.h"
 #include <math.h>
 #include <string.h>
 
@@ -654,6 +656,108 @@ static void draw_swirl(void) {                  /* MLG menu background */
     }
 }
 
+
+/* ---------- multiplayer: arena, other players, tracers ---------- */
+static const unsigned PCOL[4] = {0xe08a2c, 0x3b82e0, 0x45b04f, 0xb056d6};
+static const unsigned BPAL[5] = {0x8b5a2b, 0x7a4a22, 0xa13a2e, 0x2f5f8f, 0x4a6b3a};
+static void quadv(const V3 *q, int a, int b, int c, int d, float r, float g, float bl, float k) {
+    CV v0 = litcv(q[a], r, g, bl, k), v1 = litcv(q[b], r, g, bl, k), v2 = litcv(q[c], r, g, bl, k), v3 = litcv(q[d], r, g, bl, k);
+    tri_cv(v0, v1, v2); tri_cv(v0, v2, v3);
+}
+/* box centred at (cx,cy,cz), half sizes h*, turned by yaw (same convention as the camera) */
+static void obox(float cx, float cy, float cz, float hx, float hy, float hz, float yaw, unsigned rgb) {
+    float c = cosf(yaw), s = sinf(yaw), r = (float)(rgb >> 16 & 255), g = (float)(rgb >> 8 & 255), b = (float)(rgb & 255);
+    float rad = sqrtf(hx * hx + hy * hy + hz * hz); V3 m = tv(cx, cy, cz);
+    if (m.z < -rad || m.z - rad > FOGF + 4 || fabsf(m.x) > (m.z > 0 ? m.z : 0) * TANX + rad + 1) return;
+    V3 q[8];
+    for (int i = 0; i < 8; i++) {
+        float lx = (i & 1) ? hx : -hx, ly = (i & 2) ? hy : -hy, lz = (i & 4) ? hz : -hz;
+        q[i] = tv(cx + lx * c + lz * s, cy + ly, cz - lx * s + lz * c);
+    }
+    quadv(q, 1, 3, 7, 5, r, g, b, .85f); quadv(q, 0, 4, 6, 2, r, g, b, .7f); quadv(q, 2, 6, 7, 3, r, g, b, 1.1f);
+    quadv(q, 0, 1, 5, 4, r, g, b, .5f);  quadv(q, 4, 5, 7, 6, r, g, b, .95f); quadv(q, 0, 2, 3, 1, r, g, b, .65f);
+}
+static void prism(float x, float z, float y0, float y1, float rad, unsigned rgb, float rot) {   /* barrel: 6-sided drum */
+    float r = (float)(rgb >> 16 & 255), g = (float)(rgb >> 8 & 255), b = (float)(rgb & 255);
+    V3 m = tv(x, (y0 + y1) * .5f, z);
+    if (m.z < -1.5f || m.z > FOGF + 4 || fabsf(m.x) > (m.z > 0 ? m.z : 0) * TANX + 2) return;
+    V3 bt[6], tp[6];
+    for (int k = 0; k < 6; k++) { float a = rot + k * 1.0471976f, px = x + cosf(a) * rad, pz = z + sinf(a) * rad; bt[k] = tv(px, y0, pz); tp[k] = tv(px, y1, pz); }
+    V3 ctr = tv(x, y1, z);
+    for (int k = 0; k < 6; k++) {
+        int n = (k + 1) % 6; float sh = (k & 1) ? .72f : .9f;
+        CV a = litcv(bt[k], r, g, b, sh), c = litcv(bt[n], r, g, b, sh), d = litcv(tp[n], r, g, b, sh), e = litcv(tp[k], r, g, b, sh);
+        tri_cv(a, c, d); tri_cv(a, d, e);
+        tri_cv(litcv(tp[k], 40, 40, 40, 1.f), litcv(tp[n], 40, 40, 40, 1.f), litcv(ctr, 40, 40, 40, 1.f));
+    }
+}
+static void draw_arena(void) {
+    for (int i = 0; i < AR.nfloor; i++) {
+        const ARect *f = &AR.floor_[i]; float x0 = f->x - f->w * .5f, x1 = f->x + f->w * .5f, z0 = f->z - f->d * .5f, z1 = f->z + f->d * .5f;
+        CV a = litcv(tv(x0, .05f, z0), 91, 70, 48, 1), b = litcv(tv(x1, .05f, z0), 91, 70, 48, 1), c = litcv(tv(x1, .05f, z1), 91, 70, 48, 1), d = litcv(tv(x0, .05f, z1), 91, 70, 48, 1);
+        tri_cv(a, b, c); tri_cv(a, c, d);
+    }
+    for (int i = 0; i < AR.nb; i++) {
+        const ABox *b = &AR.box[i];
+        int nx = (int)ceilf((b->x1 - b->x0) / 10.f), nz = (int)ceilf((b->z1 - b->z0) / 10.f); if (nx < 1) nx = 1; if (nz < 1) nz = 1; if (nx > 8) nx = 8; if (nz > 8) nz = 8;
+        float sx = (b->x1 - b->x0) / nx, sz = (b->z1 - b->z0) / nz, hy = (b->y1 - b->y0) * .5f, cy = (b->y0 + b->y1) * .5f;
+        for (int a = 0; a < nx; a++) for (int c = 0; c < nz; c++)
+            obox(b->x0 + (a + .5f) * sx, cy, b->z0 + (c + .5f) * sz, sx * .5f, hy, sz * .5f, 0, b->rgb);
+    }
+    for (int i = 0; i < AR.nroof; i++) {
+        const ARect *q = &AR.roof[i]; V3 ap = tv(q->x, 5.35f, q->z); float hw = q->w * .5f, hd = q->d * .5f;
+        V3 c[4] = {tv(q->x - hw, 3.25f, q->z - hd), tv(q->x + hw, 3.25f, q->z - hd), tv(q->x + hw, 3.25f, q->z + hd), tv(q->x - hw, 3.25f, q->z + hd)};
+        static const float SH[4] = {.8f, .6f, .95f, .7f};
+        for (int k = 0; k < 4; k++) tri_cv(litcv(c[k], 74, 44, 36, SH[k]), litcv(c[(k + 1) & 3], 74, 44, 36, SH[k]), litcv(ap, 74, 44, 36, SH[k] * 1.2f));
+    }
+    for (int i = 0; i < AR.nbar; i++) { const ABarrel *q = &AR.bar[i]; prism(q->x, q->z, q->y, q->y + 1.05f, .45f, BPAL[(int)(q->k * 5.f) % 5], q->k * 40.f); }
+    for (int i = 0; i < AR.nt; i++) {
+        const Tree *t = &AR.tree[i]; float dx = t->x - C_x, dz = t->z - C_z, d2 = dx * dx + dz * dz;
+        if (d2 > (FOGF + 4) * (FOGF + 4)) continue;
+        V3 v = tv(t->x, 3 * t->s, t->z); if (v.z < -4.f || fabsf(v.x) > (v.z > 0 ? v.z : 0) * TANX + 4.5f) continue;
+        draw_tree(t, sqrtf(d2));
+    }
+}
+static void draw_player(int id) {
+    const MPPlayer *p = &M.pl[id];
+    float dx = p->x - C_x, dz = p->z - C_z; if (dx * dx + dz * dz > 95.f * 95.f) return;
+    float y = p->yaw, cs = cosf(y), sn = sinf(y), sw = p->mv ? sinf(p->ph) * .16f : 0.f; unsigned col = PCOL[id & 3];
+#define PART(lx, ly, lz, hx, hy, hz, rgb) obox(p->x + (lx) * cs + (lz) * sn, p->h + (ly), p->z - (lx) * sn + (lz) * cs, hx, hy, hz, y, rgb)
+    PART(-.12f, .37f, sw, .1f, .37f, .1f, 0x2a2f45); PART(.12f, .37f, -sw, .1f, .37f, .1f, 0x2a2f45);
+    PART(0, 1.05f, 0, .26f, .35f, .15f, col); PART(0, 1.66f, 0, .17f, .17f, .17f, 0xe0b090);
+    PART(.22f, 1.2f, -.35f, .04f, .06f, .38f, 0x222222);
+    if (p->flash > 0) PART(.22f, 1.2f, -.82f, .09f, .09f, .06f, 0xffee88);
+#undef PART
+    V3 bc = tv(p->x, p->h + 2.05f, p->z);
+    if (bc.z > .8f && bc.z < 70.f) {
+        float pct = clampf(p->hp / 100.f, 0, 1);
+        vquad(bc, .6f, .07f, 15, 15, 15);
+        vquad((V3){bc.x - .57f * (1 - pct), bc.y, bc.z}, .57f * pct, .05f, pct > .4f ? 90 : 230, pct > .4f ? 200 : 50, 60);
+        V3 nv = tv(p->x, p->h + 2.4f, p->z);
+        float ex = C_x, ey = C_y, ez = C_z, qx = p->x - ex, qy = p->h + 1.6f - ey, qz = p->z - ez, ql = sqrtf(qx * qx + qy * qy + qz * qz);
+        if (nv.z < 55.f && ql > .1f && ar_ray(ex, ey, ez, qx / ql, qy / ql, qz / ql, ql) >= ql - .6f)      /* only when not behind a wall */
+            text_c(SCR_W * .5f + nv.x / nv.z * FOCAL, SCR_H * .5f - nv.y / nv.z * FOCAL, 1, col, p->name);
+    }
+}
+static void draw_tracers(void) {
+    for (int i = 0; i < M.ntr; i++) {
+        const Tracer *t = &M.tr[i]; V3 a = tv(t->ox, t->oy, t->oz), b = tv(t->ex, t->ey, t->ez);
+        if (a.z < .4f || b.z < .4f) continue;
+        line2(SCR_W * .5f + a.x / a.z * FOCAL, SCR_H * .5f - a.y / a.z * FOCAL, SCR_W * .5f + b.x / b.z * FOCAL, SCR_H * .5f - b.y / b.z * FOCAL, 1.6f, 0xffe9a0);
+    }
+}
+static void draw_mp_hud(void) {
+    char b[64]; float cx = SCR_W * .5f;
+    snprintf(b, sizeof b, "FIRST TO %d", M.limit); text_sh(34, 28, 2, 0xc9e265, b);
+    int y = 52;
+    for (int i = 0; i < 4; i++) {
+        const MPPlayer *p = &M.pl[i]; if (!p->here) continue;
+        snprintf(b, sizeof b, "%s%s  %d/%d", i == M.myId ? ">" : " ", p->name, p->k, p->d); text_sh(34, (float)y, 1, PCOL[i & 3], b); y += 12;
+    }
+    for (int i = 0; i < 3; i++) if (M.feedT[i] > 0) text_sh(SCR_W - 34 - text_w(M.feed[i], 1), (float)(28 + i * 12), 1, 0xffffff, M.feed[i]);
+    if (M.dead) { text_c(cx, 150, 4, 0xff4040, "ELIMINATED"); snprintf(b, sizeof b, "RESPAWNING IN %d", (int)ceilf(M.rt)); text_c(cx, 200, 2, 0xffffff, b); }
+    else if (M.inv > 0) text_c(cx, 330, 1, 0x9fe0ff, "SHIELDED");
+}
 static void draw_hud(void) {
     char buf[48]; int ml = G.mlg, scoped = snp() && G.aim > .5f;
     if (G.vigT > 0) {                       /* red damage frame */
@@ -686,7 +790,8 @@ static void draw_hud(void) {
     text_sh(SCR_W - 34 - text_w(buf, 3), 384, 3, G.ammo[G.cur] == 0 ? 0xff5050 : ml ? pink_cycle(0) : 0xffffff, buf);
     text_sh(SCR_W - 34 - text_w(w->name, 2), 364, 2, ml ? pink_cycle(.2f) : 0xdddddd, w->name);
     if (G.reload > 0) text_sh(SCR_W - 34 - text_w("RELOADING", 2), 346, 2, 0xffd060, "RELOADING");
-    snprintf(buf, sizeof buf, "SLAIN: %d", G.score); text_sh(34, 28, 2, ml ? pink_cycle(.4f) : 0xc9e265, buf);
+    if (M.st == MP_MATCH) draw_mp_hud();
+    else { snprintf(buf, sizeof buf, "SLAIN: %d", G.score); text_sh(34, 28, 2, ml ? pink_cycle(.4f) : 0xc9e265, buf); }
     if (G.hintApple) text_c(cx, 300, 2, 0xffffff, ml ? "PRESS SQUARE TO EAT IT" : "PRESS SQUARE TO EAT APPLE");
     if (G.eatT > 0) text_c(cx, 300, 2, 0xffd9a0, "NOM...");
     if (ml && G.popT > 0 && G.popTxt) {         /* kill pop-ups */
@@ -715,7 +820,40 @@ static void draw_menus(void) {
             for (int i = 0; tt[i]; i++) { char ch[2] = {tt[i], 0}; text_sh(x0 + i * 30.f, 72, 5, hsv_rgb(G.t * .5f + i * .06f, 1.f, 1.f), ch); } }
         else text_c(cx, 70, 6, 0xc9e265, "HOLLOW PINES");
         text_c(cx, 126, 2, 0xb0b8a0, "SOMETHING IS MOVING BETWEEN THE TREES");
-        menu_button(cx, 200, 260, "START", G.sel == 0); menu_button(cx, 244, 260, "OPTIONS", G.sel == 1);
+        menu_button(cx, 200, 260, "START", G.sel == 0); menu_button(cx, 244, 260, "MULTIPLAYER", G.sel == 1); menu_button(cx, 288, 260, "OPTIONS", G.sel == 2);
+    } else if (G.state == ST_MPSETUP) {
+        text_c(cx, 40, 4, 0xc9e265, "MULTIPLAYER");
+        text_c(cx, 100, 2, 0xb0b8a0, "RELAY IP ADDRESS");
+        for (int i = 0; i < 4; i++) {
+            float bx = cx - 140 + i * 72; int on = M.field == i;
+            rect(bx, 124, bx + 64, 158, on ? 0x2a4a1a : 0x000000, on ? 140 : 90);
+            if (on) { rect(bx, 124, bx + 64, 126, 0xc9e265, 128); rect(bx, 156, bx + 64, 158, 0xc9e265, 128); }
+            snprintf(b, sizeof b, "%d", M.octet[i]); text_c(bx + 32, 133, 2, on ? 0xe8ff90 : 0xffffff, b);
+        }
+        text_c(cx, 176, 2, 0xb0b8a0, "GAME CODE FROM THE HOST");
+        for (int i = 0; i < 5; i++) {
+            float bx = cx - 116 + i * 48; int on = M.field == 4 + i; char ch[2] = {MP_ALPHA[M.code[i] & 31], 0};
+            rect(bx, 200, bx + 40, 240, on ? 0x2a4a1a : 0x000000, on ? 140 : 90);
+            if (on) { rect(bx, 200, bx + 40, 202, 0xc9e265, 128); rect(bx, 238, bx + 40, 240, 0xc9e265, 128); }
+            text_c(bx + 20, 210, 3, on ? 0xe8ff90 : 0xffffff, ch);
+        }
+        menu_button(cx, 262, 260, "CONNECT", M.field == 9); menu_button(cx, 302, 260, "BACK", M.field == 10);
+        if (M.msg[0]) text_c(cx, 350, 2, 0xff8080, M.msg);
+        text_c(cx, 396, 1, 0xb0b8a0, "UP/DOWN CHANGE   LEFT/RIGHT MOVE   L1 R1 BIG STEP");
+    } else if (G.state == ST_MPLOBBY) {
+        text_c(cx, 40, 4, 0xc9e265, "MULTIPLAYER");
+        if (M.st < MP_LOBBY) text_c(cx, 190, 2, 0xffffff, M.msg);
+        else {
+            char code[6]; mp_code_text(code); snprintf(b, sizeof b, "GAME CODE  %s", code); text_c(cx, 110, 2, 0xb0b8a0, b);
+            float y = 150;
+            for (int i = 0; i < 4; i++) {
+                const MPPlayer *p = &M.pl[i]; if (!p->here) continue;
+                snprintf(b, sizeof b, "%s%s", p->name, i == 0 ? "  (HOST)" : i == M.myId ? "  (YOU)" : ""); text_sh(cx - 120, y, 2, PCOL[i & 3], b); y += 26;
+            }
+            if (M.res[0]) text_c(cx, 290, 3, 0xffee00, M.res);
+            text_c(cx, 336, 2, 0xffffff, M.hostMatch ? "MATCH RUNNING - WAITING FOR ARENA" : "WAITING FOR THE HOST TO START");
+        }
+        text_c(cx, 400, 1, 0xb0b8a0, "CIRCLE  LEAVE");
     } else if (G.state == ST_PAUSE) {
         text_c(cx, 100, 5, 0xffffff, "PAUSED");
         menu_button(cx, 190, 260, "RESUME", G.sel == 0); menu_button(cx, 230, 260, "OPTIONS", G.sel == 1); menu_button(cx, 270, 260, "QUIT TO TITLE", G.sel == 2);
@@ -746,7 +884,11 @@ void render_frame(void) {
     unsigned sky = G.night ? 0x070c1a : 0xa9cfe6;
     gfx_begin(sky); tri_count = 0;
     cam_setup(x, y, z, yaw, pitch, fov);
-    draw_sky(pitch); draw_ground(); if (G.mlg) draw_weeds(); draw_trees(); draw_apples(); draw_monsters(); draw_arrows();
+    if (M.st == MP_MATCH && AR.valid && G.started) {
+        draw_sky(pitch); draw_ground(); draw_arena();
+        for (int i = 0; i < 4; i++) if (i != M.myId && M.pl[i].here && M.pl[i].seen && !M.pl[i].dead) draw_player(i);
+        draw_tracers();
+    } else { draw_sky(pitch); draw_ground(); if (G.mlg) draw_weeds(); draw_trees(); draw_apples(); draw_monsters(); draw_arrows(); }
     if (playing && !G.dead && (G.state == ST_PLAY || G.state == ST_PAUSE)) draw_viewmodel();
     if (G.state == ST_PLAY) draw_hud(); else draw_menus();
     gfx_end();

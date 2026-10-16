@@ -11,6 +11,11 @@
 #include <stdio.h>
 #include <netman.h>
 #include <ps2ip.h>
+#if __has_include(<sys/ioctl.h>)
+#include <sys/ioctl.h>
+#else
+extern int ioctl(int fd, int request, ...);   /* lwip_ioctl() in this SDK is a macro that calls ioctl() */
+#endif
 
 extern unsigned char dev9_irx[];   extern unsigned int size_dev9_irx;
 extern unsigned char netman_irx[]; extern unsigned int size_netman_irx;
@@ -19,6 +24,13 @@ extern unsigned char smap_irx[];   extern unsigned int size_smap_irx;
 static int inited, ready, sock = -1, cst;
 static char status[48] = "NETWORK OFF";
 static int dhcp_wait;   /* frames spent waiting for an address */
+
+/* "192.168.1.100" -> network-order address, 1 = ok. Replaces inet_addr(), which this SDK doesn't declare. */
+static int parse_ip(const char *s, unsigned *out) {
+    unsigned a, b, c, d; char extra; struct ip4_addr x;
+    if (!s || sscanf(s, "%u.%u.%u.%u%c", &a, &b, &c, &d, &extra) != 4 || a > 255 || b > 255 || c > 255 || d > 255) return 0;
+    IP4_ADDR(&x, a, b, c, d); *out = (unsigned)x.addr; return 1;
+}
 
 static int load_irx(void *buf, unsigned size) { int ret = 0; int id = SifExecModuleBuffer(buf, size, 0, NULL, &ret); return id >= 0 && ret != 1; }
 
@@ -45,7 +57,7 @@ int net_init(void) {
 void net_poll(void) {
     if (!inited || ready) return;
     t_ip_info info;
-    if (ps2ip_getconfig("sm0", &info) >= 0 && info.ipaddr.addr != 0) { ready = 1; snprintf(status, sizeof status, "NETWORK READY"); return; }
+    if (ps2ip_getconfig("sm0", &info) >= 0 && info.ipaddr.s_addr != 0) { ready = 1; snprintf(status, sizeof status, "NETWORK READY"); return; }
     dhcp_wait++;
     if (dhcp_wait > 60 * 15) snprintf(status, sizeof status, "NO IP ADDRESS - CHECK CABLE");
 }
@@ -54,8 +66,9 @@ const char *net_status(void) { return status; }
 
 int net_open(const char *ip, int port) {
     net_close();
-    struct sockaddr_in sa; memset(&sa, 0, sizeof sa);
-    sa.sin_family = AF_INET; sa.sin_port = htons((unsigned short)port); sa.sin_addr.s_addr = inet_addr(ip);
+    struct sockaddr_in sa; unsigned addr; memset(&sa, 0, sizeof sa);
+    if (!parse_ip(ip, &addr)) { cst = -1; return -1; }
+    sa.sin_family = AF_INET; sa.sin_port = htons((unsigned short)port); sa.sin_addr.s_addr = addr;
     sock = lwip_socket(AF_INET, SOCK_STREAM, 0);
     if (sock < 0) { cst = -1; return -1; }
     { int on = 1; lwip_ioctl(sock, FIONBIO, &on); }

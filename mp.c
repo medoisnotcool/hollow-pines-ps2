@@ -58,10 +58,10 @@ static void feed_add(const char *t) {
     snprintf(M.feed[2], sizeof M.feed[2], "%s", t); M.feedT[2] = 5.f;
 }
 static void apply_kill(int k, int v) {
-    char b[64];
+    char b[44];
     if (v >= 0 && v < 4) M.pl[v].d++;
     if (k >= 0 && k < 4 && k != v) M.pl[k].k++;
-    snprintf(b, sizeof b, "%s  X  %s", pname(k), pname(v)); feed_add(b);
+    snprintf(b, sizeof b, "%.13s  X  %.13s", pname(k), pname(v)); feed_add(b);
 }
 static void send_state(void) {
     char b[200];

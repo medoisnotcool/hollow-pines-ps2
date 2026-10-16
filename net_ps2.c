@@ -12,6 +12,17 @@
 #include <stdio.h>
 #include <netman.h>
 #include <ps2ip.h>
+/* DelayThread() is declared in its own header in the PS2SDK; fall back to usleep() if that header isn't there */
+#if defined(__has_include)
+# if __has_include(<delaythread.h>)
+#  include <delaythread.h>
+#  define HAVE_DELAYTHREAD 1
+# endif
+#endif
+#ifndef HAVE_DELAYTHREAD
+# include <unistd.h>
+# define DelayThread(us) usleep(us)
+#endif
 
 extern void *_gp;
 extern unsigned char dev9_irx[];   extern unsigned int size_dev9_irx;

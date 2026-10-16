@@ -1,0 +1,18 @@
+name: Build relay (.exe)
+on:
+  workflow_dispatch:
+  push:
+    paths: ['relay/**', '.github/workflows/relay.yml']
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: 22 }
+      - name: Package relay.js into a Windows .exe
+        run: npx --yes @yao-pkg/pkg relay/relay.js --targets node22-win-x64 --output hollow-pines-relay.exe
+      - uses: actions/upload-artifact@v4
+        with:
+          name: hollow-pines-relay
+          path: hollow-pines-relay.exe

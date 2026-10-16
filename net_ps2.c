@@ -11,11 +11,8 @@
 #include <stdio.h>
 #include <netman.h>
 #include <ps2ip.h>
-#if __has_include(<sys/ioctl.h>)
-#include <sys/ioctl.h>
-#else
-extern int ioctl(int fd, int request, ...);   /* lwip_ioctl() in this SDK is a macro that calls ioctl() */
-#endif
+/* lwip_ioctl() in this SDK is a macro that calls ioctl(), but no header declares it, so declare it here. */
+extern int ioctl(int fd, int request, ...);
 
 extern unsigned char dev9_irx[];   extern unsigned int size_dev9_irx;
 extern unsigned char netman_irx[]; extern unsigned int size_netman_irx;

@@ -116,6 +116,7 @@ server.on('upgrade', (req, sock) => {
 
 // ---------------------------------------------------------------- TCP (the PS2): "JOIN CODE\n" then JSON lines both ways
 const tcp = net.createServer(sock => {
+  log('PS2 connection arrived from', sock.remoteAddress);
   sock.setNoDelay(true); sock.setEncoding('utf8');
   const p = { kind: 'tcp', room: null, dead: false,
     // PS2 gets the bare game message as one line; envelope bits it can't use are dropped

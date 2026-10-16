@@ -1,7 +1,8 @@
-/* PS2 network layer: loads the drivers, gets an IP (DHCP) and gives mp.c a simple non-blocking TCP socket.
+/* PS2 network layer.
+ * ALL network work (loading drivers, getting an IP, connecting, sending, receiving) runs in a background thread,
+ * so the game never freezes: if something stalls, the screen keeps updating and shows the exact step it is stuck on.
  * Uses the ps2sdk network stack: DEV9 + NETMAN + SMAP on the IOP, lwIP (libps2ip) on the EE.
- * If the compiler complains about a function name in THIS file, tell me the exact error - everything
- * network related is kept here on purpose, the rest of the game never touches the network stack directly. */
+ * (Based on the version that compiled for you; the changes are the worker thread and the ring buffers.) */
 #include "net.h"
 #include "net_config.h"
 #include <kernel.h>
@@ -11,29 +12,24 @@
 #include <stdio.h>
 #include <netman.h>
 #include <ps2ip.h>
-/* Making a socket non-blocking. In this SDK lwip_ioctl() is a macro that calls plain ioctl(), which isn't in the
- * libraries we link. So we look up each possible function by its real symbol name. They are 'weak', meaning a missing
- * one just becomes NULL instead of breaking the link; set_nonblock() then uses whichever one exists. */
-extern int p_lwip_ioctl(int, long, void *) __asm__("lwip_ioctl") __attribute__((weak));
-extern int p_ioctl(int, int, ...)          __asm__("ioctl")      __attribute__((weak));
-extern int p_lwip_fcntl(int, int, int)     __asm__("lwip_fcntl") __attribute__((weak));
-static void set_nonblock(int s) {
-    int on = 1;
-    if (p_lwip_ioctl) { p_lwip_ioctl(s, FIONBIO, &on); return; }
-    if (p_ioctl)      { p_ioctl(s, FIONBIO, &on); return; }
-#if defined(F_SETFL) && defined(O_NONBLOCK)
-    if (p_lwip_fcntl) { p_lwip_fcntl(s, F_SETFL, O_NONBLOCK); return; }
-#endif
-    /* none available: the socket stays blocking (a connect to an unreachable PC may pause the game for a few seconds) */
-}
 
+extern void *_gp;
 extern unsigned char dev9_irx[];   extern unsigned int size_dev9_irx;
 extern unsigned char netman_irx[]; extern unsigned int size_netman_irx;
 extern unsigned char smap_irx[];   extern unsigned int size_smap_irx;
 
-static int inited, ready, sock = -1, cst;
+#define RXN 32768
+#define TXN 4096
+static volatile int started, failed, ipready, cst, closed;          /* cst: 0 idle, 1 connecting, 2 connected, -1 failed */
+static volatile int req_gen, conn_gen, req_want, req_port;          /* main thread bumps req_gen to ask for a connect/close */
+static char req_ip[20];
 static char status[48] = "NETWORK OFF";
-static int dhcp_wait;   /* frames spent waiting for an address */
+static unsigned char rx[RXN], tx[TXN];
+static volatile int rxh, rxt, txh, txt;                             /* head = next write, tail = next read */
+static int sock = -1;
+static char wstack[65536] __attribute__((aligned(16)));
+
+static void setst(const char *s) { snprintf(status, sizeof status, "%s", s); }
 
 /* "192.168.1.100" -> network-order address, 1 = ok. Replaces inet_addr(), which this SDK doesn't declare. */
 static int parse_ip(const char *s, unsigned *out) {
@@ -41,15 +37,18 @@ static int parse_ip(const char *s, unsigned *out) {
     if (!s || sscanf(s, "%u.%u.%u.%u%c", &a, &b, &c, &d, &extra) != 4 || a > 255 || b > 255 || c > 255 || d > 255) return 0;
     IP4_ADDR(&x, a, b, c, d); *out = (unsigned)x.addr; return 1;
 }
-
 static int load_irx(void *buf, unsigned size) { int ret = 0; int id = SifExecModuleBuffer(buf, size, 0, NULL, &ret); return id >= 0 && ret != 1; }
 
-int net_init(void) {
-    if (inited) return 0;
-    if (!load_irx(dev9_irx, size_dev9_irx)) { snprintf(status, sizeof status, "DEV9 DRIVER FAILED"); return -1; }
-    if (!load_irx(netman_irx, size_netman_irx)) { snprintf(status, sizeof status, "NETMAN DRIVER FAILED"); return -2; }
-    if (!load_irx(smap_irx, size_smap_irx)) { snprintf(status, sizeof status, "NO NETWORK ADAPTER FOUND"); return -3; }
-    if (NetManInit() < 0) { snprintf(status, sizeof status, "NETMAN INIT FAILED"); return -4; }
+static int bring_up(void) {
+    setst("NETWORK STEP 1/6: LOADING DEV9");
+    if (!load_irx(dev9_irx, size_dev9_irx)) { setst("DEV9 DRIVER FAILED"); return -1; }
+    setst("NETWORK STEP 2/6: LOADING NETMAN");
+    if (!load_irx(netman_irx, size_netman_irx)) { setst("NETMAN DRIVER FAILED"); return -2; }
+    setst("NETWORK STEP 3/6: LOADING SMAP");
+    if (!load_irx(smap_irx, size_smap_irx)) { setst("NO NETWORK ADAPTER FOUND"); return -3; }
+    setst("NETWORK STEP 4/6: STARTING NETMAN");
+    if (NetManInit() < 0) { setst("NETMAN INIT FAILED"); return -4; }
+    setst("NETWORK STEP 5/6: STARTING IP STACK");
     {
         struct ip4_addr ip, nm, gw;
         IP4_ADDR(&ip, 0, 0, 0, 0); IP4_ADDR(&nm, 0, 0, 0, 0); IP4_ADDR(&gw, 0, 0, 0, 0);
@@ -61,46 +60,88 @@ int net_init(void) {
         { t_ip_info info; if (ps2ip_getconfig("sm0", &info) >= 0) { info.dhcp_enabled = 1; ps2ip_setconfig(&info); } }
 #endif
     }
-    inited = 1; dhcp_wait = 0; snprintf(status, sizeof status, "WAITING FOR IP ADDRESS...");
     return 0;
 }
-void net_poll(void) {
-    if (!inited || ready) return;
-    t_ip_info info;
-    if (ps2ip_getconfig("sm0", &info) >= 0 && info.ipaddr.s_addr != 0) { ready = 1; snprintf(status, sizeof status, "NETWORK READY"); return; }
-    dhcp_wait++;
-    if (dhcp_wait > 60 * 15) snprintf(status, sizeof status, "NO IP ADDRESS - CHECK CABLE");
-}
-int net_ready(void) { return ready; }
-const char *net_status(void) { return status; }
 
+static void do_connect(int g) {
+    unsigned addr; struct sockaddr_in sa; memset(&sa, 0, sizeof sa);
+    if (!parse_ip(req_ip, &addr)) { cst = -1; return; }
+    sa.sin_family = AF_INET; sa.sin_port = htons((unsigned short)req_port); sa.sin_addr.s_addr = addr;
+    int s = lwip_socket(AF_INET, SOCK_STREAM, 0);
+    if (s < 0) { cst = -1; return; }
+    setst("CONNECTING TO THE RELAY");
+    int r = lwip_connect(s, (struct sockaddr *)&sa, sizeof sa);       /* may take a while: fine, we are not the game thread */
+    if (g != req_gen) { lwip_close(s); return; }                      /* the player cancelled/retried meanwhile */
+    if (r == 0) { sock = s; closed = 0; cst = 2; setst("CONNECTED TO RELAY"); } else { lwip_close(s); cst = -1; setst("RELAY REFUSED OR NOT REACHABLE"); }
+}
+static void pump_io(void) {
+    while (txt != txh && sock >= 0) {                                 /* send what the game queued */
+        int n = (txh > txt ? txh : TXN) - txt, r = lwip_send(sock, tx + txt, n, 0);
+        if (r <= 0) { closed = 1; lwip_close(sock); sock = -1; return; }
+        txt = (txt + r) % TXN;
+    }
+    int used = (rxh - rxt + RXN) % RXN;
+    if (RXN - 1 - used < 1100) { DelayThread(5000); return; }         /* receive buffer nearly full: let the game catch up */
+    fd_set rs; FD_ZERO(&rs); FD_SET(sock, &rs); struct timeval tv = {0, 20000};
+    if (lwip_select(sock + 1, &rs, NULL, NULL, &tv) > 0) {
+        unsigned char t[1024]; int r = lwip_recv(sock, t, sizeof t, 0);
+        if (r <= 0) { closed = 1; lwip_close(sock); sock = -1; return; }
+        for (int i = 0; i < r; i++) { rx[rxh] = t[i]; rxh = (rxh + 1) % RXN; }
+    }
+}
+static void worker(void *arg) {
+    (void)arg;
+    if (bring_up() < 0) { failed = 1; for (;;) DelayThread(1000000); }
+    for (int waited = 0;; waited++) {                                 /* wait for the router to hand out an address */
+        t_ip_info info; char b[48];
+        if (ps2ip_getconfig("sm0", &info) >= 0 && info.ipaddr.s_addr != 0) break;
+        snprintf(b, sizeof b, "NETWORK STEP 6/6: WAITING FOR IP (%ds)", waited / 5); setst(b);
+        DelayThread(200000);
+    }
+    ipready = 1; setst("NETWORK READY");
+    for (;;) {
+        int g = req_gen;
+        if (g != conn_gen) {
+            conn_gen = g;
+            if (sock >= 0) { lwip_close(sock); sock = -1; }
+            if (req_want) do_connect(g);
+        }
+        if (sock >= 0 && cst == 2) pump_io(); else DelayThread(20000);
+    }
+}
+
+/* ---------------------------------------------------------------- net.h (called by the game thread; never blocks) */
+int net_init(void) {
+    if (started) return 0;
+    ee_thread_t t; memset(&t, 0, sizeof t);
+    t.func = (void *)worker; t.stack = wstack; t.stack_size = sizeof wstack; t.gp_reg = &_gp; t.initial_priority = 0x20;
+    int id = CreateThread(&t);
+    if (id < 0) { setst("COULD NOT CREATE NETWORK THREAD"); failed = 1; return -1; }
+    if (StartThread(id, NULL) < 0) { setst("COULD NOT START NETWORK THREAD"); failed = 1; return -1; }
+    started = 1; setst("NETWORK STARTING..."); return 0;
+}
+void net_poll(void) {}
+int net_ready(void) { return ipready; }
+int net_failed(void) { return failed; }
+const char *net_status(void) { return status; }
 int net_open(const char *ip, int port) {
-    net_close();
-    struct sockaddr_in sa; unsigned addr; memset(&sa, 0, sizeof sa);
-    if (!parse_ip(ip, &addr)) { cst = -1; return -1; }
-    sa.sin_family = AF_INET; sa.sin_port = htons((unsigned short)port); sa.sin_addr.s_addr = addr;
-    sock = lwip_socket(AF_INET, SOCK_STREAM, 0);
-    if (sock < 0) { cst = -1; return -1; }
-    set_nonblock(sock);
-    if (lwip_connect(sock, (struct sockaddr *)&sa, sizeof sa) == 0) cst = 2; else cst = 1;   /* "failed" here just means "in progress" */
+    snprintf(req_ip, sizeof req_ip, "%s", ip); req_port = port;
+    rxh = rxt = txh = txt = 0; closed = 0; cst = 1; req_want = 1; req_gen++;
     return 0;
 }
-int net_state(void) {
-    if (cst == 1 && sock >= 0) {
-        fd_set w; FD_ZERO(&w); FD_SET(sock, &w); struct timeval tv = {0, 0};
-        if (lwip_select(sock + 1, NULL, &w, NULL, &tv) > 0) {
-            int err = 0; socklen_t l = sizeof err;
-            lwip_getsockopt(sock, SOL_SOCKET, SO_ERROR, &err, &l); cst = err ? -1 : 2;
-        }
-    }
-    return cst;
+int net_state(void) { return cst; }
+int net_write(const char *d, int n) {
+    if (cst != 2 || closed) return -1;
+    int used = (txh - txt + TXN) % TXN;
+    if (n > TXN - 1 - used) return 0;                                 /* queue full: drop (state updates repeat anyway) */
+    for (int i = 0; i < n; i++) { tx[txh] = (unsigned char)d[i]; txh = (txh + 1) % TXN; }
+    return n;
 }
-int net_write(const char *d, int n) { return sock < 0 ? -1 : lwip_send(sock, d, n, 0); }
 int net_read(char *d, int n) {
-    if (sock < 0) return -1;
-    fd_set r; FD_ZERO(&r); FD_SET(sock, &r); struct timeval tv = {0, 0};
-    if (lwip_select(sock + 1, &r, NULL, NULL, &tv) <= 0) return 0;     /* nothing waiting */
-    int k = lwip_recv(sock, d, n, 0);
-    return k > 0 ? k : -1;                                              /* readable but 0/-1 bytes = closed */
+    int avail = (rxh - rxt + RXN) % RXN;
+    if (!avail) return closed ? -1 : 0;
+    if (n > avail) n = avail;
+    for (int i = 0; i < n; i++) { d[i] = (char)rx[rxt]; rxt = (rxt + 1) % RXN; }
+    return n;
 }
-void net_close(void) { if (sock >= 0) lwip_close(sock); sock = -1; cst = 0; }
+void net_close(void) { req_want = 0; cst = 0; closed = 0; rxh = rxt = txh = txt = 0; req_gen++; }

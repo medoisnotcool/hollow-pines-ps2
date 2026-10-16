@@ -211,13 +211,18 @@ void mp_update(float dt) {
     net_poll(); M.tmo += dt;
     if (M.st == MP_NET) {
         if (net_ready()) start_connect();
-        else { say(net_status()); if (M.tmo > 25.f) fail("NO IP ADDRESS. CHECK THE CABLE"); }
+        else if (net_failed()) fail(net_status());
+        else {
+            char b[72]; snprintf(b, sizeof b, "%s  %ds", net_status(), (int)M.tmo); say(b);
+            if (M.tmo > 60.f) { snprintf(b, sizeof b, "STUCK AT: %s", net_status()); fail(b); }
+        }
         return;
     }
     if (M.st == MP_CONNECT) {
         int s = net_state();
         if (s == 2) join_now();
-        else if (s < 0 || M.tmo > 10.f) fail("COULD NOT REACH RELAY. CHECK THE IP");
+        else if (s < 0 || M.tmo > 12.f) fail("NO ANSWER FROM THE PC. CHECK IP/FIREWALL");
+        else { char b[72]; snprintf(b, sizeof b, "CONNECTING TO RELAY...  %ds", (int)M.tmo); say(b); }
         return;
     }
     pump();

@@ -11,8 +11,21 @@
 #include <stdio.h>
 #include <netman.h>
 #include <ps2ip.h>
-/* lwip_ioctl() in this SDK is a macro that calls ioctl(), but no header declares it, so declare it here. */
-extern int ioctl(int fd, int request, ...);
+/* Making a socket non-blocking. In this SDK lwip_ioctl() is a macro that calls plain ioctl(), which isn't in the
+ * libraries we link. So we look up each possible function by its real symbol name. They are 'weak', meaning a missing
+ * one just becomes NULL instead of breaking the link; set_nonblock() then uses whichever one exists. */
+extern int p_lwip_ioctl(int, long, void *) __asm__("lwip_ioctl") __attribute__((weak));
+extern int p_ioctl(int, int, ...)          __asm__("ioctl")      __attribute__((weak));
+extern int p_lwip_fcntl(int, int, int)     __asm__("lwip_fcntl") __attribute__((weak));
+static void set_nonblock(int s) {
+    int on = 1;
+    if (p_lwip_ioctl) { p_lwip_ioctl(s, FIONBIO, &on); return; }
+    if (p_ioctl)      { p_ioctl(s, FIONBIO, &on); return; }
+#if defined(F_SETFL) && defined(O_NONBLOCK)
+    if (p_lwip_fcntl) { p_lwip_fcntl(s, F_SETFL, O_NONBLOCK); return; }
+#endif
+    /* none available: the socket stays blocking (a connect to an unreachable PC may pause the game for a few seconds) */
+}
 
 extern unsigned char dev9_irx[];   extern unsigned int size_dev9_irx;
 extern unsigned char netman_irx[]; extern unsigned int size_netman_irx;
@@ -68,7 +81,7 @@ int net_open(const char *ip, int port) {
     sa.sin_family = AF_INET; sa.sin_port = htons((unsigned short)port); sa.sin_addr.s_addr = addr;
     sock = lwip_socket(AF_INET, SOCK_STREAM, 0);
     if (sock < 0) { cst = -1; return -1; }
-    { int on = 1; lwip_ioctl(sock, FIONBIO, &on); }
+    set_nonblock(sock);
     if (lwip_connect(sock, (struct sockaddr *)&sa, sizeof sa) == 0) cst = 2; else cst = 1;   /* "failed" here just means "in progress" */
     return 0;
 }

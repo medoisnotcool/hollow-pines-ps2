@@ -137,14 +137,38 @@ const tcp = net.createServer(sock => {
 });
 
 function lanIPs() { const o = []; for (const l of Object.values(os.networkInterfaces())) for (const a of l || []) if (a.family === 'IPv4' && !a.internal) o.push(a.address); return o; }
-server.listen(HTTP_PORT, '0.0.0.0', () => {
+
+// If anything goes wrong, say what it is and keep the window open (a double-clicked .exe would otherwise just vanish).
+function fatal(msg) {
+  console.error('\n  PROBLEM: ' + msg + '\n\n  Press Enter to close this window.');
+  process.stdin.resume(); process.stdin.once('data', () => process.exit(1)); process.stdin.once('end', () => process.exit(1));
+  setInterval(() => {}, 1 << 30);
+}
+process.on('uncaughtException', e => fatal(e && e.message ? e.message : String(e)));
+
+let httpPort = HTTP_PORT;
+function startHttp(tries) {
+  server.removeAllListeners('error'); server.removeAllListeners('listening');
+  server.once('error', e => {
+    if (e.code === 'EADDRINUSE' && tries < 10) { console.log('  Port ' + httpPort + ' is busy, trying ' + (httpPort + 1) + '...'); httpPort++; startHttp(tries + 1); }
+    else fatal('Could not open the web port (' + httpPort + '): ' + e.message);
+  });
+  server.listen(httpPort, '0.0.0.0', () => { server.removeAllListeners('error'); server.on('error', e => fatal(e.message)); startTcp(); });
+}
+let tcpStarted = false;
+function startTcp() {
+  if (tcpStarted) return; tcpStarted = true;
+  tcp.once('error', e => fatal(e.code === 'EADDRINUSE'
+    ? 'Port ' + TCP_PORT + ' (used by the PS2) is already in use. Close any other copy of this relay and start it again.'
+    : 'Could not open the PS2 port (' + TCP_PORT + '): ' + e.message));
   tcp.listen(TCP_PORT, '0.0.0.0', () => {
     const ips = lanIPs();
     console.log('\n  HOLLOW PINES RELAY is running\n');
-    for (const ip of ips) console.log('   Phone/PC browser :  http://' + ip + ':' + HTTP_PORT);
-    for (const ip of ips) console.log('   PS2 server IP    :  ' + ip + '   (port ' + TCP_PORT + ')');
+    for (const ip of ips) console.log('   Phone/PC browser :  http://' + ip + ':' + httpPort);
+    for (const ip of ips) console.log('   PS2 server IP    :  ' + ip + '   (type this on the PS2)');
+    if (!ips.length) console.log('   (!) No network address found - connect this PC to your router/Wi-Fi.');
     if (!findGame()) console.log('\n   (!) hollow_pines.html not found next to the relay - put it in the same folder.');
     console.log('\n  Leave this window open while you play.\n');
   });
-});
-server.on('error', e => { console.error('Could not start:', e.message); process.exit(1); });
+}
+startHttp(0);
